@@ -1,15 +1,17 @@
 #!/usr/bin/env python
 """FAERS XML risk prediction pipeline.
 
-The implementation intentionally avoids pandas/lightgbm/snorkel so it can run in
-the provided environment. It streams the FDA XML files, writes case-level CSV
-features, trains two sklearn baselines, and renders audit reports.
+The implementation intentionally avoids pandas/sklearn/lightgbm/snorkel so it
+can run in the provided environment. It streams the FDA XML files, writes
+case-level CSV features, trains two NumPy baselines, and renders audit reports.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
+import html
 import json
 import math
 import os
@@ -43,6 +45,12 @@ SERIOUSNESS_FIELDS = [
 
 Q4_VALID_FRACTION = 0.5
 SPLIT_POLICY = "2025Q1-Q3 train, earliest 50% of 2025Q4 valid, latest 50% of 2025Q4 test by receivedate"
+HASH_LOGISTIC_EPOCHS = 2
+HASH_LOGISTIC_LEARNING_RATE = 0.08
+HASH_LOGISTIC_L2 = 1e-6
+NUMERIC_LOGISTIC_EPOCHS = 80
+NUMERIC_LOGISTIC_LEARNING_RATE = 0.08
+NUMERIC_LOGISTIC_L2 = 1e-4
 
 LEAKAGE_FIELDS = set(SERIOUSNESS_FIELDS + ["label_serious"])
 
@@ -700,47 +708,123 @@ def sigmoid(values: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-clipped))
 
 
-def train_logistic(paths: list[Path], model_dir: Path, chunk_size: int, n_features: int, random_state: int) -> dict[str, Any]:
-    from sklearn.feature_extraction.text import HashingVectorizer
-    from sklearn.linear_model import SGDClassifier
+def sigmoid_scalar(value: float) -> float:
+    value = max(-40.0, min(40.0, float(value)))
+    return float(1.0 / (1.0 + math.exp(-value)))
 
+
+def stable_hash_index(token: str, n_features: int) -> int:
+    digest = hashlib.blake2b(token.encode("utf-8", errors="ignore"), digest_size=8).digest()
+    return int.from_bytes(digest, byteorder="little", signed=False) % n_features
+
+
+def hash_text_to_items(text: str, n_features: int) -> list[tuple[int, float]]:
+    counts: Counter = Counter()
+    for token in text.split():
+        if token:
+            counts[stable_hash_index(token, n_features)] += 1.0
+    if not counts:
+        return []
+    norm = math.sqrt(sum(value * value for value in counts.values())) or 1.0
+    return [(int(index), float(value / norm)) for index, value in counts.items()]
+
+
+def predict_hash_logistic_one(model: dict[str, Any], text: str) -> float:
+    weights = model["weights"]
+    score = float(model.get("bias", 0.0))
+    for index, value in hash_text_to_items(text, int(model["n_features"])):
+        score += float(weights[index]) * value
+    return sigmoid_scalar(score)
+
+
+def predict_hash_logistic_examples(model: dict[str, Any], texts: list[str]) -> np.ndarray:
+    return np.asarray([predict_hash_logistic_one(model, text) for text in texts], dtype=np.float64)
+
+
+def update_hash_logistic_model(
+    model: dict[str, Any],
+    texts: list[str],
+    labels: np.ndarray,
+    learning_rate: float,
+    l2: float,
+    class_weights: dict[int, float],
+) -> None:
+    weights = model["weights"]
+    bias = float(model.get("bias", 0.0))
+    for text, label_value in zip(texts, labels):
+        label = int(label_value)
+        items = hash_text_to_items(text, int(model["n_features"]))
+        score = bias + sum(float(weights[index]) * value for index, value in items)
+        prob = sigmoid_scalar(score)
+        error = (prob - label) * float(class_weights.get(label, 1.0))
+        for index, value in items:
+            weights[index] -= learning_rate * (error * value + l2 * weights[index])
+        bias -= learning_rate * error
+    model["bias"] = bias
+
+
+def train_hash_logistic_examples(
+    texts: list[str],
+    labels: np.ndarray,
+    n_features: int,
+    epochs: int,
+    learning_rate: float,
+    l2: float,
+    class_weights: dict[int, float],
+) -> dict[str, Any]:
+    model = {
+        "weights": np.zeros(n_features, dtype=np.float64),
+        "bias": 0.0,
+        "n_features": int(n_features),
+        "type": "hash_logistic_numpy",
+    }
+    for epoch in range(epochs):
+        epoch_lr = learning_rate / math.sqrt(epoch + 1)
+        update_hash_logistic_model(model, texts, labels, epoch_lr, l2, class_weights)
+    return model
+
+
+def train_logistic(paths: list[Path], model_dir: Path, chunk_size: int, n_features: int, random_state: int) -> dict[str, Any]:
     counts = split_label_counts(paths)
     train_counts = counts["train"]
     if train_counts[0] == 0 or train_counts[1] == 0:
         raise ValueError(f"Training split must contain both classes, got {dict(train_counts)}")
     weights = class_weights_from_counts(train_counts)
 
-    vectorizer = HashingVectorizer(
-        n_features=n_features,
-        alternate_sign=False,
-        norm="l2",
-        lowercase=False,
-        token_pattern=r"(?u)\b\S+\b",
-    )
-    clf = SGDClassifier(loss="log_loss", penalty="l2", alpha=1e-5, random_state=random_state)
-    classes = np.asarray([0, 1], dtype=np.int8)
+    model = {
+        "weights": np.zeros(n_features, dtype=np.float64),
+        "bias": 0.0,
+        "n_features": int(n_features),
+        "type": "hash_logistic_numpy",
+        "random_state": random_state,
+    }
     seen = 0
-    for texts, y in read_hash_chunks(paths, "train", chunk_size):
-        x = vectorizer.transform(texts)
-        sample_weight = np.asarray([weights[int(label)] for label in y], dtype=np.float64)
-        if seen == 0:
-            clf.partial_fit(x, y, classes=classes, sample_weight=sample_weight)
-        else:
-            clf.partial_fit(x, y, sample_weight=sample_weight)
-        seen += len(y)
-        print(f"[train] logistic seen {seen:,} train rows", end="\r")
+    for epoch in range(HASH_LOGISTIC_EPOCHS):
+        epoch_seen = 0
+        epoch_lr = HASH_LOGISTIC_LEARNING_RATE / math.sqrt(epoch + 1)
+        for texts, y in read_hash_chunks(paths, "train", chunk_size):
+            update_hash_logistic_model(model, texts, y, epoch_lr, HASH_LOGISTIC_L2, weights)
+            epoch_seen += len(y)
+            print(f"[train] hash_logistic epoch {epoch + 1}/{HASH_LOGISTIC_EPOCHS} seen {epoch_seen:,} train rows", end="\r")
+        seen = max(seen, epoch_seen)
     print()
-    model_path = model_dir / "logistic_sgd.pkl"
+    model_path = model_dir / "hash_logistic.pkl"
     with model_path.open("wb") as handle:
-        pickle.dump({"model": clf, "vectorizer": vectorizer, "numeric_features": [], "type": "hash_logistic"}, handle)
-    return {"model": clf, "vectorizer": vectorizer, "path": str(model_path), "train_rows": seen}
+        pickle.dump(model, handle)
+    return {"model": model, "path": str(model_path), "train_rows": seen}
 
 
 def metadata_from_row(row: dict[str, str]) -> dict[str, str]:
     return {
+        "safetyreportid": row.get("safetyreportid", ""),
+        "receivedate": row.get("receivedate", ""),
         "patientsex": row.get("patientsex", ""),
         "age_years": row.get("age_years", ""),
         "quarter": row.get("quarter", ""),
+        "drug_count": row.get("drug_count", ""),
+        "reaction_count": row.get("reaction_count", ""),
+        "indication_count": row.get("indication_count", ""),
+        "text_tokens": " ".join(row.get("text_tokens", "").split()[:12]),
     }
 
 
@@ -755,16 +839,11 @@ def predict_logistic(
     chunk_size: int,
     collect_rows: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, list[dict[str, str]]]:
-    clf = model_bundle["model"]
-    vectorizer = model_bundle["vectorizer"]
+    model = model_bundle["model"]
     labels: list[int] = []
     probs: list[float] = []
     for chunk_texts, y in read_hash_chunks(paths, split, chunk_size):
-        x = vectorizer.transform(chunk_texts)
-        if hasattr(clf, "predict_proba"):
-            p = clf.predict_proba(x)[:, 1]
-        else:
-            p = sigmoid(clf.decision_function(x))
+        p = predict_hash_logistic_examples(model, chunk_texts)
         labels.extend(int(v) for v in y)
         probs.extend(float(v) for v in p)
     rows = collect_metadata(paths, split) if collect_rows else []
@@ -809,34 +888,75 @@ def load_numeric_split(
     return np.asarray(x_rows, dtype=np.float64), np.asarray(y_rows, dtype=np.int8), meta_rows
 
 
-def train_numeric_hgb(paths: list[Path], model_dir: Path, max_rows: int, random_state: int) -> dict[str, Any]:
-    from sklearn.ensemble import HistGradientBoostingClassifier
+def fit_numeric_standardizer(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    means = np.nanmean(x, axis=0)
+    means = np.where(np.isnan(means), 0.0, means)
+    filled = np.where(np.isnan(x), means, x)
+    stds = np.std(filled, axis=0)
+    stds = np.where(stds < 1e-8, 1.0, stds)
+    return means.astype(np.float64), stds.astype(np.float64)
 
+
+def transform_numeric(x: np.ndarray, means: np.ndarray, stds: np.ndarray) -> np.ndarray:
+    filled = np.where(np.isnan(x), means, x)
+    return (filled - means) / stds
+
+
+def train_numeric_logistic_examples(
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    class_weights: dict[int, float],
+    epochs: int = NUMERIC_LOGISTIC_EPOCHS,
+    learning_rate: float = NUMERIC_LOGISTIC_LEARNING_RATE,
+    l2: float = NUMERIC_LOGISTIC_L2,
+) -> dict[str, Any]:
+    means, stds = fit_numeric_standardizer(x_train)
+    x_scaled = transform_numeric(x_train, means, stds)
+    weights = np.zeros(x_scaled.shape[1], dtype=np.float64)
+    bias = 0.0
+    sample_weight = np.asarray([class_weights[int(label)] for label in y_train], dtype=np.float64)
+    y_float = y_train.astype(np.float64)
+    for epoch in range(epochs):
+        probs = sigmoid(x_scaled @ weights + bias)
+        errors = (probs - y_float) * sample_weight
+        grad_w = (x_scaled.T @ errors) / len(y_train) + l2 * weights
+        grad_b = float(np.mean(errors))
+        step = learning_rate / math.sqrt(epoch + 1)
+        weights -= step * grad_w
+        bias -= step * grad_b
+    return {
+        "weights": weights,
+        "bias": bias,
+        "means": means,
+        "stds": stds,
+        "numeric_features": NUMERIC_FEATURES,
+        "type": "numeric_logistic_numpy",
+    }
+
+
+def predict_numeric_logistic_examples(model: dict[str, Any], x: np.ndarray) -> np.ndarray:
+    x_scaled = transform_numeric(x, model["means"], model["stds"])
+    return sigmoid(x_scaled @ model["weights"] + float(model["bias"]))
+
+
+def train_numeric_logistic(paths: list[Path], model_dir: Path, max_rows: int, random_state: int) -> dict[str, Any]:
     x_train, y_train, _ = load_numeric_split(paths, "train", max_rows=max_rows, random_state=random_state)
     counts = Counter(int(v) for v in y_train)
     if counts[0] == 0 or counts[1] == 0:
         raise ValueError(f"Numeric training sample must contain both classes, got {dict(counts)}")
     weights = class_weights_from_counts(counts)
-    sample_weight = np.asarray([weights[int(label)] for label in y_train], dtype=np.float64)
-    clf = HistGradientBoostingClassifier(
-        max_iter=120,
-        learning_rate=0.06,
-        max_leaf_nodes=31,
-        l2_regularization=0.1,
-        random_state=random_state,
-    )
-    print(f"[train] numeric_hgb fitting {len(y_train):,} sampled train rows")
-    clf.fit(x_train, y_train, sample_weight=sample_weight)
-    model_path = model_dir / "numeric_hgb.pkl"
+    print(f"[train] numeric_logistic fitting {len(y_train):,} sampled train rows")
+    model = train_numeric_logistic_examples(x_train, y_train, weights)
+    model["random_state"] = random_state
+    model_path = model_dir / "numeric_logistic.pkl"
     with model_path.open("wb") as handle:
-        pickle.dump({"model": clf, "numeric_features": NUMERIC_FEATURES, "type": "numeric_hgb"}, handle)
-    return {"model": clf, "path": str(model_path), "train_rows": len(y_train)}
+        pickle.dump(model, handle)
+    return {"model": model, "path": str(model_path), "train_rows": len(y_train)}
 
 
 def predict_numeric(paths: list[Path], split: str, model_bundle: dict[str, Any], collect_rows: bool = False) -> tuple[np.ndarray, np.ndarray, list[dict[str, str]]]:
     x, y, rows = load_numeric_split(paths, split, max_rows=None, collect_rows=collect_rows)
-    clf = model_bundle["model"]
-    p = clf.predict_proba(x)[:, 1]
+    p = predict_numeric_logistic_examples(model_bundle["model"], x)
     return y, p, rows
 
 
@@ -855,21 +975,25 @@ def best_threshold(y_true: np.ndarray, y_prob: np.ndarray) -> float:
 
 
 def classification_metrics(y_true: np.ndarray, y_prob: np.ndarray, threshold: float) -> dict[str, float | int | None]:
-    from sklearn.metrics import average_precision_score, f1_score, precision_score, recall_score, roc_auc_score
-
     y_pred = (y_prob >= threshold).astype(np.int8)
+    tp = int(np.sum((y_pred == 1) & (y_true == 1)))
+    fp = int(np.sum((y_pred == 1) & (y_true == 0)))
+    fn = int(np.sum((y_pred == 0) & (y_true == 1)))
+    precision = float(tp / (tp + fp)) if (tp + fp) else 0.0
+    recall = float(tp / (tp + fn)) if (tp + fn) else 0.0
+    f1 = float(2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
     metrics: dict[str, float | int | None] = {
         "n": int(len(y_true)),
         "positives": int(np.sum(y_true)),
         "positive_rate": float(np.mean(y_true)) if len(y_true) else None,
         "threshold": float(threshold),
-        "precision": float(precision_score(y_true, y_pred, zero_division=0)) if len(y_true) else None,
-        "recall": float(recall_score(y_true, y_pred, zero_division=0)) if len(y_true) else None,
-        "f1": float(f1_score(y_true, y_pred, zero_division=0)) if len(y_true) else None,
+        "precision": precision if len(y_true) else None,
+        "recall": recall if len(y_true) else None,
+        "f1": f1 if len(y_true) else None,
     }
     if len(set(int(v) for v in y_true)) == 2:
-        metrics["auroc"] = float(roc_auc_score(y_true, y_prob))
-        metrics["auprc"] = float(average_precision_score(y_true, y_prob))
+        metrics["auroc"] = roc_auc_score_manual(y_true, y_prob)
+        metrics["auprc"] = average_precision_score_manual(y_true, y_prob)
     else:
         metrics["auroc"] = None
         metrics["auprc"] = None
@@ -877,6 +1001,43 @@ def classification_metrics(y_true: np.ndarray, y_prob: np.ndarray, threshold: fl
         metrics[f"recall_at_top_{int(pct * 100)}pct"] = recall_at_top_pct(y_true, y_prob, pct)
         metrics[f"hit_rate_top_{int(pct * 100)}pct"] = hit_rate_top_pct(y_true, y_prob, pct)
     return metrics
+
+
+def roc_auc_score_manual(y_true: np.ndarray, y_prob: np.ndarray) -> float:
+    y = np.asarray(y_true, dtype=np.int8)
+    scores = np.asarray(y_prob, dtype=np.float64)
+    n_pos = int(np.sum(y == 1))
+    n_neg = int(np.sum(y == 0))
+    if n_pos == 0 or n_neg == 0:
+        return float("nan")
+    order = np.argsort(scores)
+    ranks = np.empty(len(scores), dtype=np.float64)
+    start = 0
+    while start < len(scores):
+        end = start + 1
+        while end < len(scores) and scores[order[end]] == scores[order[start]]:
+            end += 1
+        avg_rank = (start + 1 + end) / 2.0
+        ranks[order[start:end]] = avg_rank
+        start = end
+    rank_sum_pos = float(np.sum(ranks[y == 1]))
+    auc = (rank_sum_pos - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg)
+    return float(auc)
+
+
+def average_precision_score_manual(y_true: np.ndarray, y_prob: np.ndarray) -> float:
+    y = np.asarray(y_true, dtype=np.int8)
+    positives = int(np.sum(y == 1))
+    if positives == 0:
+        return 0.0
+    order = np.argsort(-np.asarray(y_prob, dtype=np.float64), kind="mergesort")
+    hits = 0
+    precision_sum = 0.0
+    for rank, index in enumerate(order, start=1):
+        if int(y[index]) == 1:
+            hits += 1
+            precision_sum += hits / rank
+    return float(precision_sum / positives)
 
 
 def recall_at_top_pct(y_true: np.ndarray, y_prob: np.ndarray, pct: float) -> float | None:
@@ -916,6 +1077,33 @@ def stratified_metrics(rows: list[dict[str, str]], y_true: np.ndarray, y_prob: n
     return strata
 
 
+def select_error_cases(rows: list[dict[str, str]], y_true: np.ndarray, y_prob: np.ndarray, threshold: float, limit: int = 3) -> dict[str, list[dict[str, Any]]]:
+    cases: dict[str, list[dict[str, Any]]] = {"false_positive": [], "false_negative": []}
+    false_positive = [idx for idx, label in enumerate(y_true) if int(label) == 0 and float(y_prob[idx]) >= threshold]
+    false_negative = [idx for idx, label in enumerate(y_true) if int(label) == 1 and float(y_prob[idx]) < threshold]
+    false_positive = sorted(false_positive, key=lambda idx: -float(y_prob[idx]))[:limit]
+    false_negative = sorted(false_negative, key=lambda idx: float(y_prob[idx]))[:limit]
+    for name, indices in (("false_positive", false_positive), ("false_negative", false_negative)):
+        for idx in indices:
+            row = rows[idx] if idx < len(rows) else {}
+            cases[name].append(
+                {
+                    "safetyreportid": row.get("safetyreportid", ""),
+                    "receivedate": row.get("receivedate", ""),
+                    "predicted_probability": float(y_prob[idx]),
+                    "predicted_label": int(float(y_prob[idx]) >= threshold),
+                    "true_label": int(y_true[idx]),
+                    "patientsex": row.get("patientsex", ""),
+                    "age_years": row.get("age_years", ""),
+                    "drug_count": row.get("drug_count", ""),
+                    "reaction_count": row.get("reaction_count", ""),
+                    "indication_count": row.get("indication_count", ""),
+                    "tokens": row.get("text_tokens", ""),
+                }
+            )
+    return cases
+
+
 def train_models(out_dir: Path, chunk_size: int, n_features: int, tree_max_rows: int, random_state: int) -> dict[str, Any]:
     paths = ensure_dirs(out_dir)
     cases = feature_paths(paths["interim"])
@@ -932,9 +1120,10 @@ def train_models(out_dir: Path, chunk_size: int, n_features: int, tree_max_rows:
         logistic_results["split_metrics"][split] = classification_metrics(y, p, logistic_threshold)
         if split in {"valid", "test"}:
             logistic_results.setdefault("strata", {})[split] = stratified_metrics(rows, y, p, logistic_threshold)
-    metrics["models"]["logistic_sgd"] = logistic_results
+            logistic_results.setdefault("error_cases", {})[split] = select_error_cases(rows, y, p, logistic_threshold)
+    metrics["models"]["hash_logistic"] = logistic_results
 
-    numeric = train_numeric_hgb(cases, paths["models"], tree_max_rows, random_state)
+    numeric = train_numeric_logistic(cases, paths["models"], tree_max_rows, random_state)
     numeric_results: dict[str, Any] = {"model_path": numeric["path"], "train_rows": numeric["train_rows"], "numeric_features": NUMERIC_FEATURES, "split_metrics": {}}
     valid_y, valid_p, _ = predict_numeric(cases, "valid", numeric)
     numeric_threshold = best_threshold(valid_y, valid_p)
@@ -945,7 +1134,8 @@ def train_models(out_dir: Path, chunk_size: int, n_features: int, tree_max_rows:
         numeric_results["split_metrics"][split] = classification_metrics(y, p, numeric_threshold)
         if split in {"valid", "test"}:
             numeric_results.setdefault("strata", {})[split] = stratified_metrics(rows, y, p, numeric_threshold)
-    metrics["models"]["numeric_hgb"] = numeric_results
+            numeric_results.setdefault("error_cases", {})[split] = select_error_cases(rows, y, p, numeric_threshold)
+    metrics["models"]["numeric_logistic"] = numeric_results
 
     (paths["reports"] / "model_metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
     (paths["models"] / "feature_config.json").write_text(
@@ -1067,7 +1257,7 @@ def render_data_audit(stats: dict[str, Any], metrics: dict[str, Any]) -> str:
         "",
         "## 数据口径",
         "",
-        "- 使用本地 `FAERS/faers_xml_2025q1` 至 `FAERS/faers_xml_2025q4` XML 数据。",
+        "- 使用本地 `data/faers_xml_2025q1` 至 `data/faers_xml_2025q4` XML 数据。",
         "- 切分策略：2025Q1-Q3 为训练集；2025Q4 按 `receivedate` 前后 50/50 拆为验证集与测试集，同日用 `safetyreportid` 稳定排序。",
         "- 重症标签由 `serious == 1` 或任一 seriousness flag 为 `1` 生成；这些字段不进入模型特征。",
         "",
@@ -1112,7 +1302,7 @@ def render_final_summary(stats: dict[str, Any], metrics: dict[str, Any]) -> str:
     lines = [
         "# 基于本地 FAERS XML 的药物风险预测摘要",
         "",
-        "本项目已按本地真实数据口径构建可复现流水线：XML 流式解析、删除列表过滤、病例级特征工程、数据质量审计、弱监督规则审计，以及两个 sklearn 基线模型。",
+        "本项目已按本地真实数据口径构建可复现流水线：XML 流式解析、删除列表过滤、病例级特征工程、数据质量审计、弱监督规则审计，以及两个 NumPy 可复现模型。",
         "",
         "## 关键结果",
         "",
@@ -1133,13 +1323,13 @@ def render_final_summary(stats: dict[str, Any], metrics: dict[str, Any]) -> str:
             "## 可复现命令",
             "",
             "```powershell",
-            "python scripts/run_faers_pipeline.py --data FAERS --out outputs --mode full",
+            "python3 scripts/run_faers_pipeline.py --data data --out outputs --mode full",
             "```",
             "",
             "若只做快速检查，可使用：",
             "",
             "```powershell",
-            "python scripts/run_faers_pipeline.py --data FAERS --out outputs_sample --mode full --sample 1000",
+            "python3 scripts/run_faers_pipeline.py --data data --out outputs_sample --mode full --sample 1000",
             "```",
             "",
         ]
@@ -1163,7 +1353,8 @@ def render_figures(stats: dict[str, Any], metrics: dict[str, Any], figure_dir: P
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
     except Exception as exc:  # pragma: no cover
-        print(f"[report] matplotlib unavailable, skipping figures: {exc}")
+        print(f"[report] matplotlib unavailable, writing SVG figures instead: {exc}")
+        render_svg_figures(stats, metrics, figure_dir)
         return
 
     quarters = sorted(stats["by_quarter"])
@@ -1221,15 +1412,85 @@ def render_figures(stats: dict[str, Any], metrics: dict[str, Any], figure_dir: P
             plt.close()
 
 
+def write_bar_svg(labels: list[str], values: list[float], path: Path, title: str, value_label: str, percent: bool = False) -> None:
+    width = 780
+    height = 420
+    margin_left = 78
+    margin_right = 28
+    margin_top = 54
+    margin_bottom = 104
+    plot_width = width - margin_left - margin_right
+    plot_height = height - margin_top - margin_bottom
+    max_value = max(values) if values else 1.0
+    if percent:
+        max_value = max(max_value, 1.0)
+    else:
+        max_value = max(max_value * 1.08, 1.0)
+    bar_gap = 18
+    bar_width = max(18, (plot_width - bar_gap * max(0, len(labels) - 1)) / max(1, len(labels)))
+    colors = ["#4C78A8", "#F28E2B", "#59A14F", "#E15759", "#76B7B2", "#B07AA1", "#EDC948"]
+    svg: list[str] = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        '<rect width="100%" height="100%" fill="#ffffff"/>',
+        f'<text x="{width / 2}" y="28" text-anchor="middle" font-family="Arial, sans-serif" font-size="20" font-weight="700">{html.escape(title)}</text>',
+        f'<text x="20" y="{height / 2}" transform="rotate(-90 20 {height / 2})" text-anchor="middle" font-family="Arial, sans-serif" font-size="13">{html.escape(value_label)}</text>',
+        f'<line x1="{margin_left}" y1="{margin_top + plot_height}" x2="{margin_left + plot_width}" y2="{margin_top + plot_height}" stroke="#333"/>',
+        f'<line x1="{margin_left}" y1="{margin_top}" x2="{margin_left}" y2="{margin_top + plot_height}" stroke="#333"/>',
+    ]
+    for tick in range(5):
+        ratio = tick / 4
+        y = margin_top + plot_height - ratio * plot_height
+        value = ratio * max_value
+        label = f"{value * 100:.0f}%" if percent else f"{value:,.0f}"
+        svg.append(f'<line x1="{margin_left - 5}" y1="{y:.2f}" x2="{margin_left + plot_width}" y2="{y:.2f}" stroke="#e5e7eb"/>')
+        svg.append(f'<text x="{margin_left - 10}" y="{y + 4:.2f}" text-anchor="end" font-family="Arial, sans-serif" font-size="11">{html.escape(label)}</text>')
+    for idx, (label, value) in enumerate(zip(labels, values)):
+        x = margin_left + idx * (bar_width + bar_gap)
+        bar_height = 0 if max_value == 0 else (value / max_value) * plot_height
+        y = margin_top + plot_height - bar_height
+        display = f"{value * 100:.1f}%" if percent else f"{value:,.0f}"
+        svg.append(f'<rect x="{x:.2f}" y="{y:.2f}" width="{bar_width:.2f}" height="{bar_height:.2f}" fill="{colors[idx % len(colors)]}"/>')
+        svg.append(f'<text x="{x + bar_width / 2:.2f}" y="{max(y - 8, 44):.2f}" text-anchor="middle" font-family="Arial, sans-serif" font-size="11">{html.escape(display)}</text>')
+        svg.append(f'<text x="{x + bar_width / 2:.2f}" y="{height - 70}" text-anchor="end" transform="rotate(-35 {x + bar_width / 2:.2f} {height - 70})" font-family="Arial, sans-serif" font-size="11">{html.escape(label)}</text>')
+    svg.append("</svg>")
+    path.write_text("\n".join(svg), encoding="utf-8")
+
+
+def render_svg_figures(stats: dict[str, Any], metrics: dict[str, Any], figure_dir: Path) -> None:
+    figure_dir.mkdir(parents=True, exist_ok=True)
+    quarters = sorted(stats["by_quarter"])
+    rates = [stats["by_quarter"][q]["positive"] / stats["by_quarter"][q]["n"] for q in quarters]
+    counts = [stats["by_quarter"][q]["n"] for q in quarters]
+    write_bar_svg(quarters, rates, figure_dir / "label_rate_by_quarter.svg", "Serious Label Rate by Quarter", "Rate", percent=True)
+    write_bar_svg(quarters, counts, figure_dir / "rows_by_quarter.svg", "Case Rows by Quarter", "Rows")
+
+    missing_fields = sorted(stats["missing"])
+    missing_rates = [stats["missing"][field] / stats["total"] for field in missing_fields]
+    write_bar_svg(missing_fields, missing_rates, figure_dir / "missing_rates.svg", "Missingness Audit", "Missing Rate", percent=True)
+
+    if metrics:
+        labels: list[str] = []
+        values: list[float] = []
+        for model_name, model in metrics.get("models", {}).items():
+            test = model.get("split_metrics", {}).get("test", {})
+            if test.get("auroc") is not None:
+                labels.append(f"{model_name} AUROC")
+                values.append(float(test.get("auroc")))
+                labels.append(f"{model_name} AUPRC")
+                values.append(float(test.get("auprc")))
+        if labels:
+            write_bar_svg(labels, values, figure_dir / "test_model_metrics.svg", "Test Model Metrics", "Score", percent=False)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="FAERS XML risk prediction pipeline")
-    parser.add_argument("--data", default="FAERS", type=Path, help="Path to FAERS data directory")
+    parser.add_argument("--data", default="data", type=Path, help="Path to FAERS data directory")
     parser.add_argument("--out", default="outputs", type=Path, help="Output directory")
     parser.add_argument("--mode", choices=["inventory", "etl", "train", "report", "full"], default="full")
     parser.add_argument("--sample", type=int, default=None, help="Optional max kept reports per quarter for quick runs")
     parser.add_argument("--chunk-size", type=int, default=5000, help="Training/evaluation chunk size for hashed model")
-    parser.add_argument("--n-features", type=int, default=2**18, help="HashingVectorizer feature count")
-    parser.add_argument("--tree-max-rows", type=int, default=200000, help="Max sampled train rows for numeric HGB")
+    parser.add_argument("--n-features", type=int, default=2**18, help="Stable hash feature count")
+    parser.add_argument("--tree-max-rows", type=int, default=200000, help="Max sampled train rows for numeric logistic baseline")
     parser.add_argument("--random-state", type=int, default=42)
     args = parser.parse_args(argv)
 

@@ -94,6 +94,43 @@ class FaersPipelineTests(unittest.TestCase):
         self.assertEqual(rows[0]["split"], "test")
         self.assertEqual(rows[3]["split"], "test")
 
+    def test_manual_rank_metrics_do_not_need_sklearn(self):
+        y_true = pipeline.np.asarray([0, 0, 1, 1], dtype=pipeline.np.int8)
+        y_prob = pipeline.np.asarray([0.1, 0.2, 0.8, 0.9], dtype=pipeline.np.float64)
+
+        metrics = pipeline.classification_metrics(y_true, y_prob, threshold=0.5)
+
+        self.assertEqual(metrics["precision"], 1.0)
+        self.assertEqual(metrics["recall"], 1.0)
+        self.assertEqual(metrics["f1"], 1.0)
+        self.assertEqual(metrics["auroc"], 1.0)
+        self.assertEqual(metrics["auprc"], 1.0)
+
+    def test_hash_logistic_learns_simple_signal_without_sklearn(self):
+        texts = [
+            "drug:SAFE reac:MILD",
+            "drug:SAFE reac:MILD",
+            "drug:RISK reac:FATAL",
+            "drug:RISK reac:FATAL",
+        ]
+        labels = pipeline.np.asarray([0, 0, 1, 1], dtype=pipeline.np.int8)
+
+        model = pipeline.train_hash_logistic_examples(
+            texts,
+            labels,
+            n_features=64,
+            epochs=25,
+            learning_rate=0.4,
+            l2=0.0,
+            class_weights={0: 1.0, 1: 1.0},
+        )
+        probs = pipeline.predict_hash_logistic_examples(model, texts)
+
+        self.assertLess(probs[0], 0.5)
+        self.assertLess(probs[1], 0.5)
+        self.assertGreater(probs[2], 0.5)
+        self.assertGreater(probs[3], 0.5)
+
 
 if __name__ == "__main__":
     unittest.main()

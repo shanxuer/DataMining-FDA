@@ -1,6 +1,6 @@
 # 课程项目实验报告：基于 2025 年度 FDA FAERS XML 的药物风险诊断性特征工程与资料治理研究
 
-> 本文件已根据本地 FAERS 数据与完整实验结果修订。实际实验以 `FAERS/faers_xml_2025q1` 至 `FAERS/faers_xml_2025q4` 的 XML 数据为准，结果产出位于 `outputs/`。
+> 本文件已根据本地 FAERS 数据与完整实验结果修订。实际实验以 `data/faers_xml_2025q1` 至 `data/faers_xml_2025q4` 的 XML 数据为准，结果产出位于 `outputs/`。
 
 ## 团队成员与分工
 
@@ -57,7 +57,7 @@
 
 本研究使用 FDA 公开 FAERS/AEMS 季度资料，实际处理的数据已下载至本地：
 
-- 本地数据目录：`FAERS/faers_xml_2025q1` 至 `FAERS/faers_xml_2025q4`
+- 本地数据目录：`data/faers_xml_2025q1` 至 `data/faers_xml_2025q4`
 - 原始格式：FAERS XML，不是 ASCII 七表格式。
 - 官方入口：
 https://www.fda.gov/drugs/fda-adverse-event-monitoring-system-aems/fda-adverse-event-monitoring-system-aems-latest-quarterly-data-files
@@ -106,13 +106,13 @@ FAERS XML 为嵌套病例结构，核心节点包括 `safetyreport`、`primaryso
 
 ### 模型
 
-本次实验根据实际环境调整了模型方案。当前环境不依赖 pandas、LightGBM、XGBoost、Snorkel 或 PyTorch，完整流程使用 Python 标准库、NumPy、scikit-learn 与 Matplotlib 完成。
+本次实验根据实际环境调整了模型方案。当前环境不依赖 pandas、scikit-learn、LightGBM、XGBoost、Snorkel 或 PyTorch，完整流程使用 Python 标准库与 NumPy 完成；若 Matplotlib 不可用，报告阶段会自动输出 SVG 图表。
 
-- **Baseline 1：HashingVectorizer + SGD Logistic Regression**
-  使用稀疏哈希文本特征与类别/分箱 token，训练可增量处理大样本的逻辑回归基线。
+- **Baseline：NumPy numeric logistic regression**
+  使用数值聚合特征训练逻辑回归基线。训练阶段默认从训练集抽样 200,000 条，降低全量训练的内存与时间压力。
 
-- **Baseline 2：sklearn HistGradientBoostingClassifier**
-  使用数值聚合特征训练树模型基线。训练阶段默认从训练集抽样 200,000 条，降低全量训练的内存与时间压力。
+- **Proposed：NumPy stable-hash token logistic regression**
+  使用标准化药名、反应 PT、适应症、给药途径、处置动作、反应结局和分箱统计 token，以 `blake2b` 稳定哈希映射到固定维度，并用在线逻辑回归训练可复现模型。
 
 ### 弱监督规则审计
 
@@ -152,34 +152,34 @@ FAERS XML 为嵌套病例结构，核心节点包括 `safetyreport`、`primaryso
 
 | 模型 | 切分 | AUROC | AUPRC | F1 | Recall@Top5% |
 | --- | --- | ---: | ---: | ---: | ---: |
-| logistic_sgd | train | 0.9856 | 0.9886 | 0.9553 | 0.0878 |
-| logistic_sgd | valid | 0.9869 | 0.9898 | 0.9628 | 0.0861 |
-| logistic_sgd | test | 0.9837 | 0.9859 | 0.9552 | 0.0904 |
-| numeric_hgb | train | 0.8858 | 0.9156 | 0.8286 | 0.0872 |
-| numeric_hgb | valid | 0.8849 | 0.9182 | 0.8339 | 0.0857 |
-| numeric_hgb | test | 0.8757 | 0.9007 | 0.8142 | 0.0893 |
+| hash_logistic | train | 0.9886 | 0.9913 | 0.9601 | 0.0878 |
+| hash_logistic | valid | 0.9890 | 0.9915 | 0.9663 | 0.0861 |
+| hash_logistic | test | 0.9861 | 0.9879 | 0.9594 | 0.0904 |
+| numeric_logistic | train | 0.7718 | 0.8096 | 0.7665 | 0.0832 |
+| numeric_logistic | valid | 0.7921 | 0.8390 | 0.7825 | 0.0837 |
+| numeric_logistic | test | 0.7775 | 0.8101 | 0.7541 | 0.0854 |
 
-测试集上，`logistic_sgd` 的 AUROC 与 AUPRC 明显高于纯数值树模型，说明标准化药名、反应 PT、适应症等稀疏 token 对重症标签具有较强解释与排序能力。与此同时，过高的指标也提示需要持续排查目标泄漏与语义捷径，尤其是反应术语中可能直接含有死亡、住院或致命相关信息。
+测试集上，`hash_logistic` 的 AUROC 与 AUPRC 明显高于纯数值基线 `numeric_logistic`，说明标准化药名、反应 PT、适应症等稀疏 token 对重症标签具有较强解释与排序能力。与此同时，过高的指标也提示需要持续排查目标泄漏与语义捷径，尤其是反应术语中可能直接含有死亡、住院或致命相关信息。
 
 ### 产出文件
 
 完整实验产出位于 `outputs/`：
 
 - `outputs/interim/`：季度病例级 CSV、`inventory.json`、`parse_log.json`
-- `outputs/models/`：`logistic_sgd.pkl`、`numeric_hgb.pkl`、`feature_config.json`
+- `outputs/models/`：`hash_logistic.pkl`、`numeric_logistic.pkl`、`feature_config.json`
 - `outputs/reports/`：`data_audit.md`、`final_summary.md`、`model_metrics.json`、`feature_audit.json`
 - `outputs/reports/figures/`：标签率、样本数、缺失率与测试集模型指标图
 
 可复现命令：
 
-```powershell
-python scripts/run_faers_pipeline.py --data FAERS --out outputs --mode full
+```bash
+python3 scripts/run_faers_pipeline.py --data data --out outputs --mode full
 ```
 
 快速验证命令：
 
-```powershell
-python scripts/run_faers_pipeline.py --data FAERS --out outputs_sample --mode full --sample 1000
+```bash
+python3 scripts/run_faers_pipeline.py --data data --out outputs_sample --mode full --sample 1000
 ```
 
 ## 风险清单与后续改进
@@ -197,7 +197,7 @@ python scripts/run_faers_pipeline.py --data FAERS --out outputs_sample --mode fu
 本次仅完成规则覆盖率、冲突率与一致性审计，没有使用 Snorkel 生成概率标签。后续可在有依赖支持时加入 Snorkel LabelModel，并与当前硬标签基线对照。
 
 5. **模型对照仍可扩展**
-当前树模型为 sklearn HistGradientBoostingClassifier，未使用 LightGBM/XGBoost。后续若允许安装依赖，可加入更强树模型与消融实验。
+当前纯数值基线为 NumPy 逻辑回归，未使用 LightGBM/XGBoost。后续若允许安装依赖，可加入更强树模型与消融实验。
 
 ## 里程碑与完成情况
 
@@ -206,7 +206,7 @@ python scripts/run_faers_pipeline.py --data FAERS --out outputs_sample --mode fu
 | 资料准备 | 下载并确认 2025Q1-Q4 FAERS XML 数据 | 已完成 |
 | ETL | 流式解析 XML、过滤删除列表、生成病例级 CSV | 已完成 |
 | 资料审计 | 输出缺失率、标签分布、药物名称覆盖率、弱监督规则审计 | 已完成 |
-| 基线建模 | 训练 logistic_sgd 与 numeric_hgb 两个基线 | 已完成 |
+| 基线建模 | 训练 hash_logistic 与 numeric_logistic 两个可复现模型 | 已完成 |
 | 评估报告 | 输出训练/验证/测试指标、图表与中文摘要 | 已完成 |
 | 后续增强 | RxNorm、Snorkel、LightGBM/XGBoost、严格泄漏消融 | 待扩展 |
 
