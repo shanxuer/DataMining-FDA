@@ -6,6 +6,7 @@
 
 - 数据源：本地 `data` 目录中的 2025Q1-2025Q4 XML。
 - 切分：2025Q1-Q3 训练集；2025Q4 按 `receivedate` 前后 50/50 拆为验证集和测试集，同日用 `safetyreportid` 稳定排序。
+-  数据依据说明：本项目以本地 FAERS XML 数据目录、时间切分策略、重症标签规则和防泄漏约束作为实验数据依据；具体数据清点、解析日志和模型审计结果由运行流程输出至 `outputs/`。
 - 标签：`serious == 1` 或任一 seriousness flag 为 `1` 时标记为重症病例。
 - 防泄漏：`serious`、`seriousness*`、`label_serious` 仅用于标签和审计，不进入模型特征。
 
