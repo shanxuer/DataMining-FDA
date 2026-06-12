@@ -112,6 +112,8 @@ def sample_ablation():
                 "n": 100,
                 "auroc": 0.90123,
                 "auprc": 0.89123,
+                "precision": 0.88,
+                "recall": 0.85,
                 "f1": 0.86432,
             }
         },
@@ -120,6 +122,8 @@ def sample_ablation():
                 "n": 40,
                 "auroc": 0.80111,
                 "auprc": 0.79111,
+                "precision": 0.78,
+                "recall": 0.76,
                 "f1": 0.77111,
             }
         },
@@ -128,6 +132,8 @@ def sample_ablation():
                 "n": 200,
                 "auroc": 0.91234,
                 "auprc": 0.90123,
+                "precision": 0.88,
+                "recall": 0.87,
                 "f1": 0.875,
             }
         },
@@ -264,7 +270,11 @@ class FinalReportTests(unittest.TestCase):
         self.assertIn("0.8195", text)
         self.assertIn("FP-1", text)
         self.assertIn("| `all_tokens` | false_positive | FP-1 |", text)
-        self.assertIn("| sex | 1 | 100 | 0.9012 | 0.8912 | 0.8643 |", text)
+        self.assertIn(
+            "| sex | 1 | 100 | 0.9012 | 0.8912 | 0.8800 | 0.8500 | "
+            "0.8643 |",
+            text,
+        )
         self.assertIn("| 2025Q1 | 100 | 60 | 60.00% |", text)
         self.assertIn("| `age_years` | 40 | 10.00% |", text)
         self.assertIn(
@@ -331,13 +341,19 @@ class FinalReportTests(unittest.TestCase):
                         audit,
                     )
 
-    def test_stratum_none_auc_metrics_render_as_na(self):
+    def test_stratum_none_classification_metrics_render_as_na(self):
         ablation = sample_ablation()
         senior = ablation["experiments"]["all_tokens"]["strata"]["test"][
             "age_bin"
         ]["senior"]
-        senior["auroc"] = None
-        senior["auprc"] = None
+        for metric_name in (
+            "auroc",
+            "auprc",
+            "precision",
+            "recall",
+            "f1",
+        ):
+            senior[metric_name] = None
 
         text = final_reporting.render_final_report(
             ablation,
@@ -346,9 +362,84 @@ class FinalReportTests(unittest.TestCase):
         )
 
         self.assertIn(
-            "| age_bin | senior | 40 | NA | NA | 0.7711 |",
+            "| age_bin | senior | 40 | NA | NA | NA | NA | NA |",
             text,
         )
+
+    def test_weak_supervision_outputs_complete_overall_and_test_metrics(self):
+        text = final_reporting.render_final_report(
+            sample_ablation(),
+            sample_weak(),
+            sample_audit(),
+        )
+
+        self.assertIn(
+            "| overall | 400 | 120 | 30.00% | 10 | 8.33% | 110 | "
+            "80.00% | 82.00% | 78.00% | 0.7995 |",
+            text,
+        )
+        self.assertIn(
+            "| test | 100 | 30 | 30.00% | 2 | 6.67% | 28 | "
+            "82.00% | 84.00% | 80.00% | 0.8195 |",
+            text,
+        )
+
+    def test_weak_supervision_metrics_are_dynamic(self):
+        weak = sample_weak()
+        original = final_reporting.render_final_report(
+            sample_ablation(),
+            weak,
+            sample_audit(),
+        )
+        weak["splits"]["test"]["voted"] = 27
+        weak["splits"]["test"]["precision"] = 0.91
+        weak["splits"]["test"]["recall"] = 0.73
+        changed = final_reporting.render_final_report(
+            sample_ablation(),
+            weak,
+            sample_audit(),
+        )
+
+        self.assertIn("| test | 100 | 30 | 30.00% | 2 | 6.67% | 28 |", original)
+        self.assertIn(
+            "| test | 100 | 30 | 30.00% | 2 | 6.67% | 27 | "
+            "82.00% | 91.00% | 73.00% | 0.8195 |",
+            changed,
+        )
+        self.assertNotEqual(original, changed)
+
+    def test_missing_any_required_weak_supervision_metric_is_rejected(self):
+        required_metrics = (
+            "total",
+            "covered",
+            "coverage_rate",
+            "conflicts",
+            "conflict_rate",
+            "voted",
+            "accuracy",
+            "precision",
+            "recall",
+            "f1",
+        )
+        for bucket_name in ("overall", "test"):
+            for metric_name in required_metrics:
+                with self.subTest(
+                    bucket=bucket_name,
+                    metric=metric_name,
+                ):
+                    weak = sample_weak()
+                    bucket = (
+                        weak["overall"]
+                        if bucket_name == "overall"
+                        else weak["splits"]["test"]
+                    )
+                    del bucket[metric_name]
+                    with self.assertRaisesRegex(ValueError, metric_name):
+                        final_reporting.render_final_report(
+                            sample_ablation(),
+                            weak,
+                            sample_audit(),
+                        )
 
     def test_failure_case_tokens_escape_markdown_pipe(self):
         text = final_reporting.render_final_report(

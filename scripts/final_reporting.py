@@ -122,6 +122,35 @@ def _change_description(reference: Any, comparison: Any) -> str:
     return f"上升 {_metric(-change)}"
 
 
+def _weak_summary_row(label: str, bucket: dict[str, Any]) -> str:
+    context = f"weak supervision {label} metric"
+    total = _integer(_required(bucket, "total", context), f"{context} total")
+    covered = _integer(
+        _required(bucket, "covered", context),
+        f"{context} covered",
+    )
+    coverage_rate = _required(bucket, "coverage_rate", context)
+    conflicts = _integer(
+        _required(bucket, "conflicts", context),
+        f"{context} conflicts",
+    )
+    conflict_rate = _required(bucket, "conflict_rate", context)
+    voted = _integer(
+        _required(bucket, "voted", context),
+        f"{context} voted",
+    )
+    accuracy = _required(bucket, "accuracy", context)
+    precision = _required(bucket, "precision", context)
+    recall = _required(bucket, "recall", context)
+    f1 = _required(bucket, "f1", context)
+    return (
+        f"| {label} | {total:,} | {covered:,} | "
+        f"{_percent(coverage_rate)} | {conflicts:,} | "
+        f"{_percent(conflict_rate)} | {voted:,} | {_percent(accuracy)} | "
+        f"{_percent(precision)} | {_percent(recall)} | {_metric(f1)} |"
+    )
+
+
 def render_final_report(
     ablation: dict[str, Any],
     weak: dict[str, Any],
@@ -146,27 +175,11 @@ def render_final_report(
         "test",
         "weak supervision split",
     )
-    overall_coverage = _required(
-        weak_overall,
-        "coverage_rate",
-        "weak overall metric",
-    )
-    overall_conflict = _required(
-        weak_overall,
-        "conflict_rate",
-        "weak overall metric",
-    )
-    test_accuracy = _required(
-        weak_test,
-        "accuracy",
-        "weak test metric",
-    )
-    test_f1 = _required(weak_test, "f1", "weak test metric")
     rules = _required(weak_overall, "rules", "weak overall field")
-    _percent(overall_coverage)
-    _percent(overall_conflict)
-    _percent(test_accuracy)
-    _metric(test_f1)
+    weak_summary_rows = [
+        _weak_summary_row("overall", weak_overall),
+        _weak_summary_row("test", weak_test),
+    ]
 
     all_tokens = experiment_items["all_tokens"]
     error_splits = _required(
@@ -306,13 +319,14 @@ def render_final_report(
             "",
             "## 弱监督扩展",
             "",
-            f"- 总体规则覆盖率：{_percent(overall_coverage)}",
-            f"- 总体冲突率：{_percent(overall_conflict)}",
-            f"- 测试集非弃权弱标签准确率：{_percent(test_accuracy)}",
-            f"- 测试集弱标签 F1：{_metric(test_f1)}",
-            "",
             "弱监督指标只针对规则非弃权且非冲突的覆盖子集，不能与完整测试集模型"
             "指标作无条件横向比较。",
+            "",
+            "| 范围 | 总样本 | 已覆盖 | 覆盖率 | 冲突数 | 冲突率 | 有效投票 | "
+            "Accuracy | Precision | Recall | F1 |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | "
+            "---: | ---: |",
+            *weak_summary_rows,
             "",
             "| 规则 | 触发数 | 覆盖率 | 命中样本重症率 | 规则准确率 |",
             "| --- | ---: | ---: | ---: | ---: |",
@@ -368,8 +382,8 @@ def render_final_report(
             "",
             "## 分层误差分析",
             "",
-            "| 分层字段 | 分组 | 样本数 | AUROC | AUPRC | F1 |",
-            "| --- | --- | ---: | ---: | ---: | ---: |",
+            "| 分层字段 | 分组 | 样本数 | AUROC | AUPRC | Precision | Recall | F1 |",
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
     for group_name, groups in sorted(test_strata.items()):
@@ -381,10 +395,13 @@ def render_final_report(
             )
             auroc = _stratum_metric(metrics, "auroc", context)
             auprc = _stratum_metric(metrics, "auprc", context)
-            f1 = _metric(_required(metrics, "f1", context))
+            precision = _stratum_metric(metrics, "precision", context)
+            recall = _stratum_metric(metrics, "recall", context)
+            f1 = _stratum_metric(metrics, "f1", context)
             lines.append(
                 f"| {_escape_cell(group_name)} | {_escape_cell(value)} | "
-                f"{count:,} | {auroc} | {auprc} | {f1} |"
+                f"{count:,} | {auroc} | {auprc} | {precision} | "
+                f"{recall} | {f1} |"
             )
 
     lines.extend(
