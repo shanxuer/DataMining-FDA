@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import os
@@ -80,6 +81,7 @@ def iter_ablation_chunks(
     paths: list[Path],
     split: str,
     chunk_size: int,
+    collect_rows: bool = True,
 ) -> Iterable[tuple[dict[str, list[str]], np.ndarray, list[dict[str, str]]]]:
     texts = {name: [] for name in ABLATION_CONFIGS}
     labels: list[int] = []
@@ -88,7 +90,8 @@ def iter_ablation_chunks(
         for name in ABLATION_CONFIGS:
             texts[name].append(build_ablation_text(row, name))
         labels.append(int(row["label_serious"]))
-        metadata.append(pipeline.metadata_from_row(row))
+        if collect_rows:
+            metadata.append(pipeline.metadata_from_row(row))
         if len(labels) >= chunk_size:
             yield texts, np.asarray(labels, dtype=np.int8), metadata
             texts = {name: [] for name in ABLATION_CONFIGS}
@@ -107,6 +110,25 @@ def _new_model(name: str, n_features: int, random_state: int) -> dict[str, Any]:
         "experiment": name,
         "random_state": random_state,
     }
+
+
+def _validate_training_parameters(
+    chunk_size: int,
+    n_features: int,
+    epochs: int,
+    learning_rate: float,
+    l2: float,
+) -> None:
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be greater than 0")
+    if n_features <= 0:
+        raise ValueError("n_features must be greater than 0")
+    if epochs <= 0:
+        raise ValueError("epochs must be greater than 0")
+    if not math.isfinite(learning_rate) or learning_rate <= 0:
+        raise ValueError("learning_rate must be finite and greater than 0")
+    if not math.isfinite(l2) or l2 < 0:
+        raise ValueError("l2 must be finite and greater than or equal to 0")
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -149,6 +171,13 @@ def train_ablation_models(
     l2: float,
     random_state: int,
 ) -> tuple[dict[str, dict[str, Any]], int]:
+    _validate_training_parameters(
+        chunk_size,
+        n_features,
+        epochs,
+        learning_rate,
+        l2,
+    )
     train_counts = pipeline.split_label_counts(paths)["train"]
     if train_counts[0] == 0 or train_counts[1] == 0:
         raise ValueError(
@@ -164,7 +193,12 @@ def train_ablation_models(
     for epoch in range(epochs):
         epoch_seen = 0
         epoch_learning_rate = learning_rate / math.sqrt(epoch + 1)
-        for texts, labels, _ in iter_ablation_chunks(paths, "train", chunk_size):
+        for texts, labels, _ in iter_ablation_chunks(
+            paths,
+            "train",
+            chunk_size,
+            collect_rows=False,
+        ):
             for name, model in models.items():
                 pipeline.update_hash_logistic_model(
                     model,
@@ -196,6 +230,7 @@ def predict_ablation_models(
         paths,
         split,
         chunk_size,
+        collect_rows=collect_rows,
     ):
         labels.extend(int(value) for value in chunk_labels)
         if collect_rows:
@@ -238,21 +273,6 @@ def run_ablation_experiments(
         l2,
         random_state,
     )
-    predictions = {}
-    for split in ("train", "valid", "test"):
-        predictions[split] = predict_ablation_models(
-            paths,
-            split,
-            models,
-            chunk_size,
-            collect_rows=split in {"valid", "test"},
-        )
-
-    valid_labels, valid_probabilities, _ = predictions["valid"]
-    thresholds = {
-        name: pipeline.best_threshold(valid_labels, valid_probabilities[name])
-        for name in models
-    }
     result: dict[str, Any] = {
         "metadata": {
             "split_policy": pipeline.SPLIT_POLICY,
@@ -269,24 +289,67 @@ def run_ablation_experiments(
         "experiments": {},
     }
     for name in models:
-        item: dict[str, Any] = {
+        result["experiments"][name] = {
             "description": ABLATION_CONFIGS[name]["description"],
             "model_path": str(ablation_dir / "models" / f"{name}.pkl"),
             "train_rows": train_rows,
-            "threshold_from_valid": thresholds[name],
             "split_metrics": {},
             "error_cases": {},
             "strata": {},
         }
-        for split in ("train", "valid", "test"):
-            labels, split_probabilities, rows = predictions[split]
+
+    valid_labels, valid_probabilities, valid_rows = predict_ablation_models(
+        paths,
+        "valid",
+        models,
+        chunk_size,
+        collect_rows=True,
+    )
+    thresholds = {}
+    for name in models:
+        threshold = pipeline.best_threshold(
+            valid_labels,
+            valid_probabilities[name],
+        )
+        thresholds[name] = threshold
+        item = result["experiments"][name]
+        item["threshold_from_valid"] = threshold
+        item["split_metrics"]["valid"] = pipeline.classification_metrics(
+            valid_labels,
+            valid_probabilities[name],
+            threshold,
+        )
+        item["error_cases"]["valid"] = pipeline.select_error_cases(
+            valid_rows,
+            valid_labels,
+            valid_probabilities[name],
+            threshold,
+        )
+        item["strata"]["valid"] = pipeline.stratified_metrics(
+            valid_rows,
+            valid_labels,
+            valid_probabilities[name],
+            threshold,
+        )
+    del valid_labels, valid_probabilities, valid_rows
+
+    for split in ("train", "test"):
+        labels, split_probabilities, rows = predict_ablation_models(
+            paths,
+            split,
+            models,
+            chunk_size,
+            collect_rows=split == "test",
+        )
+        for name in models:
+            item = result["experiments"][name]
             probabilities = split_probabilities[name]
             item["split_metrics"][split] = pipeline.classification_metrics(
                 labels,
                 probabilities,
                 thresholds[name],
             )
-            if split in {"valid", "test"}:
+            if split == "test":
                 item["error_cases"][split] = pipeline.select_error_cases(
                     rows,
                     labels,
@@ -299,9 +362,9 @@ def run_ablation_experiments(
                     probabilities,
                     thresholds[name],
                 )
-        result["experiments"][name] = item
+        del labels, split_probabilities, rows
 
-    numeric_item = dict(numeric_baseline)
+    numeric_item = copy.deepcopy(numeric_baseline)
     numeric_item["description"] = "Existing numeric logistic baseline"
     result["experiments"]["numeric_logistic"] = numeric_item
     _atomic_write_json(ablation_dir / "ablation_metrics.json", result)
