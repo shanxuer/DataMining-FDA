@@ -38,6 +38,16 @@ RULE_ORDER = (
     "extreme_polypharmacy_30plus",
     "device_product_issue",
 )
+ERROR_SCALAR_FIELDS = (
+    "safetyreportid",
+    "receivedate",
+    "patientsex",
+    "age_years",
+    "drug_count",
+    "reaction_count",
+    "indication_count",
+    "tokens",
+)
 
 
 def _mapping(value: Any, context: str) -> dict[str, Any]:
@@ -76,6 +86,26 @@ def _integer(value: Any, context: str) -> int:
     if not number.is_integer() or number < 0:
         raise ValueError(f"{context}: required count is invalid: {value!r}")
     return int(number)
+
+
+def _safe_scalar(value: Any, context: str) -> Any:
+    if not isinstance(value, (str, int, float, bool, type(None))):
+        raise ValueError(
+            f"{context}: expected scalar, got {type(value).__name__}"
+        )
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"{context}: scalar is not finite: {value!r}")
+    return value
+
+
+def _binary_label(value: Any, context: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{context}: required label must be 0 or 1: {value!r}")
+    if isinstance(value, int) and value in (0, 1):
+        return value
+    if isinstance(value, str) and value.strip() in ("0", "1"):
+        return int(value.strip())
+    raise ValueError(f"{context}: required label must be 0 or 1: {value!r}")
 
 
 def _dashboard_data(
@@ -159,10 +189,35 @@ def _dashboard_data(
                 cases_context,
             )
             for index, raw_case in enumerate(cases):
-                case = _mapping(raw_case, f"{cases_context}.{index}")
+                case_context = f"{cases_context}[{index}]"
+                case = _mapping(raw_case, case_context)
+                validated_case = dict(case)
+                for field in ERROR_SCALAR_FIELDS:
+                    if field in case:
+                        validated_case[field] = _safe_scalar(
+                            case[field],
+                            f"{case_context}.{field}",
+                        )
+                probability_context = (
+                    f"{case_context}.predicted_probability"
+                )
+                validated_case["predicted_probability"] = _number(
+                    _required(
+                        case,
+                        "predicted_probability",
+                        probability_context,
+                    ),
+                    probability_context,
+                )
+                for field in ("predicted_label", "true_label"):
+                    field_context = f"{case_context}.{field}"
+                    validated_case[field] = _binary_label(
+                        _required(case, field, field_context),
+                        field_context,
+                    )
                 errors.append(
                     {
-                        **case,
+                        **validated_case,
                         "model": name,
                         "type": error_type,
                     }

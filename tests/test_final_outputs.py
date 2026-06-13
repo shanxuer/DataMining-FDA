@@ -103,8 +103,15 @@ def sample_ablation():
     experiments["all_tokens"]["error_cases"]["test"]["false_positive"] = [
         {
             "safetyreportid": "FP-1",
+            "receivedate": "20251231",
             "predicted_probability": 0.99123,
+            "predicted_label": 1,
             "true_label": 0,
+            "patientsex": "1",
+            "age_years": "72",
+            "drug_count": "8",
+            "reaction_count": "3",
+            "indication_count": "2",
             "tokens": "reac:SEPSIS|reactionoutcome:5",
         }
     ]
@@ -976,6 +983,61 @@ class DashboardTests(unittest.TestCase):
             dashboard._dashboard_data(
                 sample_ablation(),
                 weak,
+                sample_audit(),
+            )
+
+    def test_dashboard_rejects_invalid_error_case_fields_with_context(self):
+        cases = (
+            *(("predicted_probability", value) for value in (
+                True,
+                None,
+                "bad",
+                math.nan,
+                math.inf,
+            )),
+            ("true_label", {"value": 0}),
+            ("predicted_label", 2),
+            *(("tokens", value) for value in (
+                {"term": "reac:SEPSIS"},
+                ["reac:SEPSIS"],
+                {"reac:SEPSIS"},
+                ("reac:SEPSIS",),
+            )),
+        )
+        context = (
+            r"ablation\.experiments\.all_tokens\.error_cases\.test"
+            r"\.false_positive\[0\]"
+        )
+        for field, invalid in cases:
+            with self.subTest(field=field, invalid=invalid):
+                ablation = sample_ablation()
+                ablation["experiments"]["all_tokens"]["error_cases"]["test"][
+                    "false_positive"
+                ][0][field] = invalid
+                with self.assertRaisesRegex(
+                    ValueError,
+                    rf"{context}\.{field}",
+                ):
+                    dashboard._dashboard_data(
+                        ablation,
+                        sample_weak(),
+                        sample_audit(),
+                    )
+
+    def test_dashboard_rejects_non_mapping_error_case_with_context(self):
+        ablation = sample_ablation()
+        ablation["experiments"]["all_tokens"]["error_cases"]["test"][
+            "false_positive"
+        ][0] = ["not", "a", "mapping"]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"ablation\.experiments\.all_tokens\.error_cases\.test"
+            r"\.false_positive\[0\]",
+        ):
+            dashboard._dashboard_data(
+                ablation,
+                sample_weak(),
                 sample_audit(),
             )
 
