@@ -6,6 +6,7 @@ import json
 import math
 import os
 import tempfile
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -30,41 +31,89 @@ TEST_METRICS = (
 )
 
 
+def _mapping(value: Any, context: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{context}: expected mapping, got {type(value).__name__}")
+    return value
+
+
+def _list(value: Any, context: str) -> list[Any]:
+    if not isinstance(value, list):
+        raise ValueError(f"{context}: expected list, got {type(value).__name__}")
+    return value
+
+
 def _required(mapping: dict[str, Any], key: str, context: str) -> Any:
-    if not isinstance(mapping, dict) or key not in mapping or mapping[key] is None:
-        raise ValueError(f"Missing required {context}: {key}")
+    if not isinstance(mapping, dict):
+        raise ValueError(f"{context}: parent must be a mapping")
+    if key not in mapping or mapping[key] is None:
+        raise ValueError(f"{context}: required value is missing")
     return mapping[key]
 
 
-def _metric(value: Any) -> str:
-    if value is None:
-        raise ValueError("Required metric is missing")
+def _present(mapping: dict[str, Any], key: str, context: str) -> Any:
+    if not isinstance(mapping, dict):
+        raise ValueError(f"{context}: parent must be a mapping")
+    if key not in mapping:
+        raise ValueError(f"{context}: required value is missing")
+    return mapping[key]
+
+
+def _number(value: Any, context: str, kind: str) -> float:
+    if value is None or isinstance(value, bool):
+        raise ValueError(f"{context}: required {kind} is invalid: {value!r}")
     try:
         number = float(value)
     except (TypeError, ValueError) as exc:
-        raise ValueError(f"Required metric is invalid: {value!r}") from exc
+        raise ValueError(
+            f"{context}: required {kind} is invalid: {value!r}"
+        ) from exc
     if not math.isfinite(number):
-        raise ValueError(f"Required metric is invalid: {value!r}")
+        raise ValueError(f"{context}: required {kind} is invalid: {value!r}")
+    return number
+
+
+def _metric(value: Any, context: str) -> str:
+    number = _number(value, context, "metric")
     return f"{number:.4f}"
 
 
-def _percent(value: Any) -> str:
-    if value is None:
-        raise ValueError("Required percentage is missing")
-    try:
-        number = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"Required percentage is invalid: {value!r}") from exc
-    if not math.isfinite(number):
-        raise ValueError(f"Required percentage is invalid: {value!r}")
+def _percent(value: Any, context: str) -> str:
+    number = _number(value, context, "percentage")
     return f"{100.0 * number:.2f}%"
 
 
 def _integer(value: Any, context: str) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"Required count is invalid for {context}: {value!r}") from exc
+    invalid = f"{context}: required count is invalid: {value!r}"
+    if value is None or isinstance(value, bool):
+        raise ValueError(invalid)
+
+    if isinstance(value, int):
+        number = value
+    elif isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            raise ValueError(invalid)
+        number = int(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            raise ValueError(invalid)
+        try:
+            decimal_value = Decimal(text)
+        except InvalidOperation as exc:
+            raise ValueError(invalid) from exc
+        if (
+            not decimal_value.is_finite()
+            or decimal_value != decimal_value.to_integral_value()
+        ):
+            raise ValueError(invalid)
+        number = int(decimal_value)
+    else:
+        raise ValueError(invalid)
+
+    if number < 0:
+        raise ValueError(invalid)
+    return number
 
 
 def _escape_cell(value: Any) -> str:
@@ -76,78 +125,104 @@ def _escape_cell(value: Any) -> str:
     )
 
 
-def _stratum_metric(
-    metrics: dict[str, Any],
-    key: str,
-    context: str,
-) -> str:
-    if not isinstance(metrics, dict) or key not in metrics:
-        raise ValueError(f"Missing required {context}: {key}")
-    value = metrics[key]
+def _nullable_metric(value: Any, context: str) -> str:
     if value is None:
         return "NA"
-    return _metric(value)
+    return _metric(value, context)
 
 
 def _test_metrics(
     experiment: dict[str, Any],
     experiment_name: str,
 ) -> dict[str, Any]:
-    split_metrics = _required(
-        experiment,
-        "split_metrics",
-        f"{experiment_name} field",
+    experiment_context = f"ablation.experiments.{experiment_name}"
+    split_metrics = _mapping(
+        _required(
+            experiment,
+            "split_metrics",
+            f"{experiment_context}.split_metrics",
+        ),
+        f"{experiment_context}.split_metrics",
     )
-    test = _required(
-        split_metrics,
-        "test",
-        f"{experiment_name} split",
+    test = _mapping(
+        _required(
+            split_metrics,
+            "test",
+            f"{experiment_context}.split_metrics.test",
+        ),
+        f"{experiment_context}.split_metrics.test",
     )
     for metric_name in TEST_METRICS:
+        metric_context = (
+            f"{experiment_context}.split_metrics.test.{metric_name}"
+        )
         value = _required(
             test,
             metric_name,
-            f"{experiment_name} test metric",
+            metric_context,
         )
-        _metric(value)
+        _metric(value, metric_context)
     return test
 
 
-def _change_description(reference: Any, comparison: Any) -> str:
-    reference_value = float(reference)
-    comparison_value = float(comparison)
+def _change_description(
+    reference: Any,
+    comparison: Any,
+    reference_context: str,
+    comparison_context: str,
+) -> str:
+    reference_value = _number(reference, reference_context, "metric")
+    comparison_value = _number(comparison, comparison_context, "metric")
     change = reference_value - comparison_value
     if change >= 0:
-        return f"下降 {_metric(change)}"
-    return f"上升 {_metric(-change)}"
+        return f"下降 {_metric(change, f'{comparison_context}.change')}"
+    return f"上升 {_metric(-change, f'{comparison_context}.change')}"
 
 
-def _weak_summary_row(label: str, bucket: dict[str, Any]) -> str:
-    context = f"weak supervision {label} metric"
-    total = _integer(_required(bucket, "total", context), f"{context} total")
+def _weak_summary_row(
+    label: str,
+    bucket: dict[str, Any],
+    context: str,
+) -> str:
+    total = _integer(
+        _required(bucket, "total", f"{context}.total"),
+        f"{context}.total",
+    )
     covered = _integer(
-        _required(bucket, "covered", context),
-        f"{context} covered",
+        _required(bucket, "covered", f"{context}.covered"),
+        f"{context}.covered",
     )
-    coverage_rate = _required(bucket, "coverage_rate", context)
+    coverage_rate = _required(
+        bucket,
+        "coverage_rate",
+        f"{context}.coverage_rate",
+    )
     conflicts = _integer(
-        _required(bucket, "conflicts", context),
-        f"{context} conflicts",
+        _required(bucket, "conflicts", f"{context}.conflicts"),
+        f"{context}.conflicts",
     )
-    conflict_rate = _required(bucket, "conflict_rate", context)
+    conflict_rate = _required(
+        bucket,
+        "conflict_rate",
+        f"{context}.conflict_rate",
+    )
     voted = _integer(
-        _required(bucket, "voted", context),
-        f"{context} voted",
+        _required(bucket, "voted", f"{context}.voted"),
+        f"{context}.voted",
     )
-    accuracy = _required(bucket, "accuracy", context)
-    precision = _required(bucket, "precision", context)
-    recall = _required(bucket, "recall", context)
-    f1 = _required(bucket, "f1", context)
+    accuracy = _required(bucket, "accuracy", f"{context}.accuracy")
+    precision = _required(bucket, "precision", f"{context}.precision")
+    recall = _required(bucket, "recall", f"{context}.recall")
+    f1 = _required(bucket, "f1", f"{context}.f1")
     return (
         f"| {label} | {total:,} | {covered:,} | "
-        f"{_percent(coverage_rate)} | {conflicts:,} | "
-        f"{_percent(conflict_rate)} | {voted:,} | {_percent(accuracy)} | "
-        f"{_percent(precision)} | {_percent(recall)} | {_metric(f1)} |"
+        f"{_percent(coverage_rate, f'{context}.coverage_rate')} | "
+        f"{conflicts:,} | "
+        f"{_percent(conflict_rate, f'{context}.conflict_rate')} | "
+        f"{voted:,} | {_percent(accuracy, f'{context}.accuracy')} | "
+        f"{_percent(precision, f'{context}.precision')} | "
+        f"{_percent(recall, f'{context}.recall')} | "
+        f"{_metric(f1, f'{context}.f1')} |"
     )
 
 
@@ -156,51 +231,90 @@ def render_final_report(
     weak: dict[str, Any],
     audit: dict[str, Any],
 ) -> str:
-    experiments = _required(ablation, "experiments", "ablation field")
+    ablation = _mapping(ablation, "ablation")
+    experiments = _mapping(
+        _required(ablation, "experiments", "ablation.experiments"),
+        "ablation.experiments",
+    )
     experiment_items: dict[str, dict[str, Any]] = {}
     test_results: dict[str, dict[str, Any]] = {}
     for name in EXPERIMENT_ORDER:
-        experiment = _required(experiments, name, "experiment")
+        experiment_context = f"ablation.experiments.{name}"
+        experiment = _mapping(
+            _required(experiments, name, experiment_context),
+            experiment_context,
+        )
         experiment_items[name] = experiment
         test_results[name] = _test_metrics(experiment, name)
 
-    total = _integer(_required(audit, "total", "audit field"), "audit total")
-    by_quarter = _required(audit, "by_quarter", "audit field")
-    missing = _required(audit, "missing", "audit field")
-
-    weak_overall = _required(weak, "overall", "weak supervision field")
-    weak_splits = _required(weak, "splits", "weak supervision field")
-    weak_test = _required(
-        weak_splits,
-        "test",
-        "weak supervision split",
+    audit = _mapping(audit, "audit")
+    total = _integer(
+        _required(audit, "total", "audit.total"),
+        "audit.total",
     )
-    rules = _required(weak_overall, "rules", "weak overall field")
+    by_quarter = _mapping(
+        _required(audit, "by_quarter", "audit.by_quarter"),
+        "audit.by_quarter",
+    )
+    missing = _mapping(
+        _required(audit, "missing", "audit.missing"),
+        "audit.missing",
+    )
+
+    weak = _mapping(weak, "weak")
+    weak_overall = _mapping(
+        _required(weak, "overall", "weak.overall"),
+        "weak.overall",
+    )
+    weak_splits = _mapping(
+        _required(weak, "splits", "weak.splits"),
+        "weak.splits",
+    )
+    weak_test = _mapping(
+        _required(weak_splits, "test", "weak.splits.test"),
+        "weak.splits.test",
+    )
+    rules = _mapping(
+        _required(weak_overall, "rules", "weak.overall.rules"),
+        "weak.overall.rules",
+    )
     weak_summary_rows = [
-        _weak_summary_row("overall", weak_overall),
-        _weak_summary_row("test", weak_test),
+        _weak_summary_row("overall", weak_overall, "weak.overall"),
+        _weak_summary_row("test", weak_test, "weak.splits.test"),
     ]
 
     all_tokens = experiment_items["all_tokens"]
-    error_splits = _required(
-        all_tokens,
-        "error_cases",
-        "all_tokens field",
+    error_splits = _mapping(
+        _required(
+            all_tokens,
+            "error_cases",
+            "ablation.experiments.all_tokens.error_cases",
+        ),
+        "ablation.experiments.all_tokens.error_cases",
     )
-    test_errors = _required(
-        error_splits,
-        "test",
-        "all_tokens error split",
+    test_errors = _mapping(
+        _required(
+            error_splits,
+            "test",
+            "ablation.experiments.all_tokens.error_cases.test",
+        ),
+        "ablation.experiments.all_tokens.error_cases.test",
     )
-    strata_splits = _required(
-        all_tokens,
-        "strata",
-        "all_tokens field",
+    strata_splits = _mapping(
+        _required(
+            all_tokens,
+            "strata",
+            "ablation.experiments.all_tokens.strata",
+        ),
+        "ablation.experiments.all_tokens.strata",
     )
-    test_strata = _required(
-        strata_splits,
-        "test",
-        "all_tokens strata split",
+    test_strata = _mapping(
+        _required(
+            strata_splits,
+            "test",
+            "ablation.experiments.all_tokens.strata.test",
+        ),
+        "ablation.experiments.all_tokens.strata.test",
     )
 
     all_test = test_results["all_tokens"]
@@ -232,20 +346,24 @@ def render_final_report(
         "| 季度 | 样本数 | 重症数 | 重症率 |",
         "| --- | ---: | ---: | ---: |",
     ]
-    for quarter, item in sorted(by_quarter.items()):
-        quarter_context = f"audit quarter {quarter}"
+    for quarter, raw_item in sorted(
+        by_quarter.items(),
+        key=lambda pair: str(pair[0]),
+    ):
+        quarter_context = f"audit.by_quarter.{quarter}"
+        item = _mapping(raw_item, quarter_context)
         quarter_n = _integer(
-            _required(item, "n", quarter_context),
-            f"{quarter_context} n",
+            _required(item, "n", f"{quarter_context}.n"),
+            f"{quarter_context}.n",
         )
         positive = _integer(
-            _required(item, "positive", quarter_context),
-            f"{quarter_context} positive",
+            _required(item, "positive", f"{quarter_context}.positive"),
+            f"{quarter_context}.positive",
         )
         serious_rate = positive / quarter_n if quarter_n else 0.0
         lines.append(
             f"| {_escape_cell(quarter)} | {quarter_n:,} | {positive:,} | "
-            f"{_percent(serious_rate)} |"
+            f"{_percent(serious_rate, f'{quarter_context}.positive_rate')} |"
         )
 
     lines.extend(
@@ -257,12 +375,13 @@ def render_final_report(
             "| --- | ---: | ---: |",
         ]
     )
-    for field, value in sorted(missing.items()):
-        missing_count = _integer(value, f"audit missing {field}")
+    for field, value in sorted(missing.items(), key=lambda pair: str(pair[0])):
+        missing_context = f"audit.missing.{field}"
+        missing_count = _integer(value, missing_context)
         missing_rate = missing_count / total if total else 0.0
         lines.append(
             f"| `{_escape_cell(field)}` | {missing_count:,} | "
-            f"{_percent(missing_rate)} |"
+            f"{_percent(missing_rate, f'{missing_context}.rate')} |"
         )
 
     lines.extend(
@@ -288,31 +407,50 @@ def render_final_report(
     )
     for name in EXPERIMENT_ORDER:
         test = test_results[name]
+        test_context = f"ablation.experiments.{name}.split_metrics.test"
         lines.append(
-            f"| `{name}` | {_metric(test['auroc'])} | "
-            f"{_metric(test['auprc'])} | {_metric(test['precision'])} | "
-            f"{_metric(test['recall'])} | {_metric(test['f1'])} | "
-            f"{_metric(test['recall_at_top_5pct'])} | "
-            f"{_metric(test['hit_rate_top_5pct'])} |"
+            f"| `{name}` | {_metric(test['auroc'], f'{test_context}.auroc')} | "
+            f"{_metric(test['auprc'], f'{test_context}.auprc')} | "
+            f"{_metric(test['precision'], f'{test_context}.precision')} | "
+            f"{_metric(test['recall'], f'{test_context}.recall')} | "
+            f"{_metric(test['f1'], f'{test_context}.f1')} | "
+            f"{_metric(test['recall_at_top_5pct'], f'{test_context}.recall_at_top_5pct')} | "
+            f"{_metric(test['hit_rate_top_5pct'], f'{test_context}.hit_rate_top_5pct')} |"
         )
 
+    all_auroc_context = (
+        "ablation.experiments.all_tokens.split_metrics.test.auroc"
+    )
+    no_reaction_auroc_context = (
+        "ablation.experiments.without_reaction_pt.split_metrics.test.auroc"
+    )
+    no_outcome_auroc_context = (
+        "ablation.experiments.without_reaction_outcome.split_metrics.test.auroc"
+    )
     reaction_change = _change_description(
         all_test["auroc"],
         no_reaction_test["auroc"],
+        all_auroc_context,
+        no_reaction_auroc_context,
     )
     outcome_change = _change_description(
         all_test["auroc"],
         no_outcome_test["auroc"],
+        all_auroc_context,
+        no_outcome_auroc_context,
     )
     lines.extend(
         [
             "",
             "## 语义捷径诊断",
             "",
-            f"完整模型测试集 AUROC 为 {_metric(all_test['auroc'])}。"
-            f"移除反应 PT 后 AUROC 为 {_metric(no_reaction_test['auroc'])}，"
+            f"完整模型测试集 AUROC 为 "
+            f"{_metric(all_test['auroc'], all_auroc_context)}。"
+            f"移除反应 PT 后 AUROC 为 "
+            f"{_metric(no_reaction_test['auroc'], no_reaction_auroc_context)}，"
             f"相对完整模型{reaction_change}；移除 `reactionoutcome:*` 后 AUROC 为 "
-            f"{_metric(no_outcome_test['auroc'])}，相对完整模型{outcome_change}。",
+            f"{_metric(no_outcome_test['auroc'], no_outcome_auroc_context)}，"
+            f"相对完整模型{outcome_change}。",
             "",
             "两项变化量化了反应语义对预测性能的贡献。若指标明显下降，应将完整模型"
             "结果解释为病例重症识别能力，而不是未经约束的药物因果风险估计。",
@@ -332,18 +470,33 @@ def render_final_report(
             "| --- | ---: | ---: | ---: | ---: |",
         ]
     )
-    for name, item in sorted(rules.items()):
-        rule_context = f"weak rule {name}"
+    for name, raw_item in sorted(rules.items(), key=lambda pair: str(pair[0])):
+        rule_context = f"weak.overall.rules.{name}"
+        item = _mapping(raw_item, rule_context)
         fires = _integer(
-            _required(item, "fires", rule_context),
-            f"{rule_context} fires",
+            _required(item, "fires", f"{rule_context}.fires"),
+            f"{rule_context}.fires",
         )
-        coverage = _required(item, "coverage_rate", rule_context)
-        positive_rate = _required(item, "positive_label_rate", rule_context)
-        accuracy = _required(item, "accuracy", rule_context)
+        coverage = _required(
+            item,
+            "coverage_rate",
+            f"{rule_context}.coverage_rate",
+        )
+        positive_rate = _required(
+            item,
+            "positive_label_rate",
+            f"{rule_context}.positive_label_rate",
+        )
+        accuracy = _required(
+            item,
+            "accuracy",
+            f"{rule_context}.accuracy",
+        )
         lines.append(
-            f"| `{_escape_cell(name)}` | {fires:,} | {_percent(coverage)} | "
-            f"{_percent(positive_rate)} | {_percent(accuracy)} |"
+            f"| `{_escape_cell(name)}` | {fires:,} | "
+            f"{_percent(coverage, f'{rule_context}.coverage_rate')} | "
+            f"{_percent(positive_rate, f'{rule_context}.positive_label_rate')} | "
+            f"{_percent(accuracy, f'{rule_context}.accuracy')} |"
         )
 
     lines.extend(
@@ -356,24 +509,44 @@ def render_final_report(
         ]
     )
     for error_type in ("false_positive", "false_negative"):
-        cases = _required(
-            test_errors,
-            error_type,
-            "all_tokens test error type",
+        cases_context = (
+            "ablation.experiments.all_tokens.error_cases.test."
+            f"{error_type}"
         )
-        for case in cases:
-            case_context = f"all_tokens {error_type} case"
-            report_id = _required(case, "safetyreportid", case_context)
+        cases = _list(
+            _required(test_errors, error_type, cases_context),
+            cases_context,
+        )
+        for index, raw_case in enumerate(cases):
+            case_context = f"{cases_context}.{index}"
+            case = _mapping(raw_case, case_context)
+            report_id = _required(
+                case,
+                "safetyreportid",
+                f"{case_context}.safetyreportid",
+            )
             probability = _required(
                 case,
                 "predicted_probability",
-                case_context,
+                f"{case_context}.predicted_probability",
             )
-            true_label = _required(case, "true_label", case_context)
-            tokens = _required(case, "tokens", case_context)
+            true_label = _integer(
+                _required(
+                    case,
+                    "true_label",
+                    f"{case_context}.true_label",
+                ),
+                f"{case_context}.true_label",
+            )
+            tokens = _required(
+                case,
+                "tokens",
+                f"{case_context}.tokens",
+            )
             lines.append(
                 f"| `all_tokens` | {error_type} | "
-                f"{_escape_cell(report_id)} | {_metric(probability)} | "
+                f"{_escape_cell(report_id)} | "
+                f"{_metric(probability, f'{case_context}.predicted_probability')} | "
                 f"{_escape_cell(true_label)} | {_escape_cell(tokens)} |"
             )
 
@@ -386,18 +559,45 @@ def render_final_report(
             "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
-    for group_name, groups in sorted(test_strata.items()):
-        for value, metrics in sorted(groups.items()):
-            context = f"all_tokens stratum {group_name}={value}"
+    for group_name, raw_groups in sorted(
+        test_strata.items(),
+        key=lambda pair: str(pair[0]),
+    ):
+        group_context = (
+            "ablation.experiments.all_tokens.strata.test."
+            f"{group_name}"
+        )
+        groups = _mapping(raw_groups, group_context)
+        for value, raw_metrics in sorted(
+            groups.items(),
+            key=lambda pair: str(pair[0]),
+        ):
+            context = f"{group_context}.{value}"
+            metrics = _mapping(raw_metrics, context)
             count = _integer(
-                _required(metrics, "n", context),
-                f"{context} n",
+                _required(metrics, "n", f"{context}.n"),
+                f"{context}.n",
             )
-            auroc = _stratum_metric(metrics, "auroc", context)
-            auprc = _stratum_metric(metrics, "auprc", context)
-            precision = _stratum_metric(metrics, "precision", context)
-            recall = _stratum_metric(metrics, "recall", context)
-            f1 = _stratum_metric(metrics, "f1", context)
+            auroc = _nullable_metric(
+                _present(metrics, "auroc", f"{context}.auroc"),
+                f"{context}.auroc",
+            )
+            auprc = _nullable_metric(
+                _present(metrics, "auprc", f"{context}.auprc"),
+                f"{context}.auprc",
+            )
+            precision = _nullable_metric(
+                _present(metrics, "precision", f"{context}.precision"),
+                f"{context}.precision",
+            )
+            recall = _nullable_metric(
+                _present(metrics, "recall", f"{context}.recall"),
+                f"{context}.recall",
+            )
+            f1 = _nullable_metric(
+                _present(metrics, "f1", f"{context}.f1"),
+                f"{context}.f1",
+            )
             lines.append(
                 f"| {_escape_cell(group_name)} | {_escape_cell(value)} | "
                 f"{count:,} | {auroc} | {auprc} | {precision} | "
@@ -456,11 +656,19 @@ def _atomic_write_text(path: Path, text: str) -> None:
         prefix=f".{path.name}.",
         dir=path.parent,
     )
+    fd_owned = True
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle = os.fdopen(fd, "w", encoding="utf-8")
+        fd_owned = False
+        with handle:
             handle.write(text)
         os.replace(temp_name, path)
     except Exception:
+        if fd_owned:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         try:
             os.unlink(temp_name)
         except FileNotFoundError:

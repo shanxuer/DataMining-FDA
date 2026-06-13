@@ -1,4 +1,5 @@
 import json
+import math
 import sys
 import tempfile
 import unittest
@@ -217,15 +218,15 @@ def write_inputs(output_dir, ablation=None, weak=None, audit=None):
     for path in paths.values():
         path.parent.mkdir(parents=True, exist_ok=True)
     paths["ablation"].write_text(
-        json.dumps(ablation or sample_ablation()),
+        json.dumps(sample_ablation() if ablation is None else ablation),
         encoding="utf-8",
     )
     paths["weak"].write_text(
-        json.dumps(weak or sample_weak()),
+        json.dumps(sample_weak() if weak is None else weak),
         encoding="utf-8",
     )
     paths["audit"].write_text(
-        json.dumps(audit or sample_audit()),
+        json.dumps(sample_audit() if audit is None else audit),
         encoding="utf-8",
     )
     return paths
@@ -454,13 +455,236 @@ class FinalReportTests(unittest.TestCase):
             text,
         )
 
-    def test_helper_formatters_reject_none(self):
-        with self.assertRaisesRegex(ValueError, "metric"):
-            final_reporting._metric(None)
-        with self.assertRaisesRegex(ValueError, "percentage"):
-            final_reporting._percent(None)
-        with self.assertRaisesRegex(ValueError, "field"):
-            final_reporting._required({"field": None}, "field", "test field")
+    def test_invalid_metric_errors_include_complete_context(self):
+        context = "ablation.experiments.all_tokens.split_metrics.test.auroc"
+        for invalid in (None, True, "not-a-number", math.nan, math.inf):
+            with self.subTest(value=invalid):
+                ablation = sample_ablation()
+                ablation["experiments"]["all_tokens"]["split_metrics"]["test"][
+                    "auroc"
+                ] = invalid
+                with self.assertRaisesRegex(ValueError, context):
+                    final_reporting.render_final_report(
+                        ablation,
+                        sample_weak(),
+                        sample_audit(),
+                    )
+
+    def test_invalid_nullable_metric_includes_complete_context(self):
+        ablation = sample_ablation()
+        ablation["experiments"]["all_tokens"]["strata"]["test"]["sex"]["1"][
+            "f1"
+        ] = "not-a-number"
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"ablation\.experiments\.all_tokens\.strata\.test\.sex\.1\.f1",
+        ):
+            final_reporting.render_final_report(
+                ablation,
+                sample_weak(),
+                sample_audit(),
+            )
+
+    def test_invalid_percent_error_includes_complete_context(self):
+        weak = sample_weak()
+        weak["overall"]["coverage_rate"] = math.inf
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"weak\.overall\.coverage_rate",
+        ):
+            final_reporting.render_final_report(
+                sample_ablation(),
+                weak,
+                sample_audit(),
+            )
+
+    def test_invalid_containers_raise_contextual_value_errors(self):
+        cases = []
+
+        ablation = sample_ablation()
+        ablation["experiments"] = []
+        cases.append(
+            (
+                r"ablation\.experiments",
+                ablation,
+                sample_weak(),
+                sample_audit(),
+            )
+        )
+
+        audit = sample_audit()
+        audit["by_quarter"] = []
+        cases.append(
+            (
+                r"audit\.by_quarter",
+                sample_ablation(),
+                sample_weak(),
+                audit,
+            )
+        )
+
+        audit = sample_audit()
+        audit["missing"] = []
+        cases.append(
+            (
+                r"audit\.missing",
+                sample_ablation(),
+                sample_weak(),
+                audit,
+            )
+        )
+
+        weak = sample_weak()
+        weak["overall"]["rules"] = []
+        cases.append(
+            (
+                r"weak\.overall\.rules",
+                sample_ablation(),
+                weak,
+                sample_audit(),
+            )
+        )
+
+        ablation = sample_ablation()
+        ablation["experiments"]["all_tokens"]["error_cases"] = []
+        cases.append(
+            (
+                r"ablation\.experiments\.all_tokens\.error_cases",
+                ablation,
+                sample_weak(),
+                sample_audit(),
+            )
+        )
+
+        ablation = sample_ablation()
+        ablation["experiments"]["all_tokens"]["error_cases"]["test"][
+            "false_positive"
+        ] = {}
+        cases.append(
+            (
+                r"ablation\.experiments\.all_tokens\.error_cases\.test"
+                r"\.false_positive",
+                ablation,
+                sample_weak(),
+                sample_audit(),
+            )
+        )
+
+        for context, ablation, weak, audit in cases:
+            with self.subTest(context=context):
+                with self.assertRaisesRegex(ValueError, context):
+                    final_reporting.render_final_report(
+                        ablation,
+                        weak,
+                        audit,
+                    )
+
+    def test_invalid_counts_are_rejected_with_complete_context(self):
+        invalid_values = (True, 1.9, math.nan, math.inf, -1)
+        cases = (
+            (
+                r"audit\.total",
+                lambda ablation, weak, audit, value: audit.__setitem__(
+                    "total",
+                    value,
+                ),
+            ),
+            (
+                r"audit\.by_quarter\.2025Q1\.n",
+                lambda ablation, weak, audit, value: audit["by_quarter"][
+                    "2025Q1"
+                ].__setitem__("n", value),
+            ),
+            (
+                r"audit\.by_quarter\.2025Q1\.positive",
+                lambda ablation, weak, audit, value: audit["by_quarter"][
+                    "2025Q1"
+                ].__setitem__("positive", value),
+            ),
+            (
+                r"audit\.missing\.age_years",
+                lambda ablation, weak, audit, value: audit["missing"].__setitem__(
+                    "age_years",
+                    value,
+                ),
+            ),
+            (
+                r"weak\.overall\.covered",
+                lambda ablation, weak, audit, value: weak["overall"].__setitem__(
+                    "covered",
+                    value,
+                ),
+            ),
+            (
+                r"weak\.overall\.conflicts",
+                lambda ablation, weak, audit, value: weak["overall"].__setitem__(
+                    "conflicts",
+                    value,
+                ),
+            ),
+            (
+                r"weak\.overall\.voted",
+                lambda ablation, weak, audit, value: weak["overall"].__setitem__(
+                    "voted",
+                    value,
+                ),
+            ),
+            (
+                r"weak\.overall\.rules\.high_risk_reaction\.fires",
+                lambda ablation, weak, audit, value: weak["overall"]["rules"][
+                    "high_risk_reaction"
+                ].__setitem__("fires", value),
+            ),
+            (
+                r"ablation\.experiments\.all_tokens\.strata\.test\.sex\.1\.n",
+                lambda ablation, weak, audit, value: ablation["experiments"][
+                    "all_tokens"
+                ]["strata"]["test"]["sex"]["1"].__setitem__("n", value),
+            ),
+        )
+        for context, mutate in cases:
+            for invalid in invalid_values:
+                with self.subTest(context=context, value=invalid):
+                    ablation = sample_ablation()
+                    weak = sample_weak()
+                    audit = sample_audit()
+                    mutate(ablation, weak, audit, invalid)
+                    with self.assertRaisesRegex(ValueError, context):
+                        final_reporting.render_final_report(
+                            ablation,
+                            weak,
+                            audit,
+                        )
+
+    def test_integer_counts_accept_supported_representations(self):
+        audit = sample_audit()
+        audit["total"] = "400"
+        audit["by_quarter"]["2025Q1"]["n"] = 100.0
+        audit["by_quarter"]["2025Q1"]["positive"] = "60"
+        audit["missing"]["age_years"] = 40.0
+
+        text = final_reporting.render_final_report(
+            sample_ablation(),
+            sample_weak(),
+            audit,
+        )
+
+        self.assertIn("构建了 400 条病例级样本", text)
+        self.assertIn("| 2025Q1 | 100 | 60 | 60.00% |", text)
+
+    def test_helper_formatters_include_context(self):
+        with self.assertRaisesRegex(ValueError, r"metrics\.example"):
+            final_reporting._metric(None, "metrics.example")
+        with self.assertRaisesRegex(ValueError, r"rates\.example"):
+            final_reporting._percent(None, "rates.example")
+        with self.assertRaisesRegex(ValueError, r"payload\.field"):
+            final_reporting._required(
+                {"field": None},
+                "field",
+                "payload.field",
+            )
 
 
 class FinalReportFileTests(unittest.TestCase):
@@ -503,6 +727,64 @@ class FinalReportFileTests(unittest.TestCase):
                 if path.name.startswith(".report.md.")
             ]
             self.assertEqual(leftovers, [])
+
+    def test_fdopen_failure_closes_raw_fd_and_cleans_temp_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            destination = root / "report.md"
+            destination.write_text("original", encoding="utf-8")
+            real_close = final_reporting.os.close
+
+            with mock.patch.object(
+                final_reporting.os,
+                "fdopen",
+                side_effect=OSError("fdopen failed"),
+            ), mock.patch.object(
+                final_reporting.os,
+                "close",
+                wraps=real_close,
+            ) as close_spy:
+                with self.assertRaisesRegex(OSError, "fdopen failed"):
+                    final_reporting._atomic_write_text(
+                        destination,
+                        "replacement",
+                    )
+
+            close_spy.assert_called_once()
+            self.assertEqual(
+                destination.read_text(encoding="utf-8"),
+                "original",
+            )
+            leftovers = [
+                path
+                for path in root.iterdir()
+                if path.name.startswith(".report.md.")
+            ]
+            self.assertEqual(leftovers, [])
+
+    def test_missing_input_file_error_contains_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            expected = root / "ablations" / "ablation_metrics.json"
+
+            with self.assertRaises(FileNotFoundError) as error:
+                final_reporting.generate_final_report(
+                    root,
+                    root / "report.md",
+                )
+
+            self.assertIn(str(expected), str(error.exception))
+
+    def test_write_inputs_preserves_empty_payloads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = write_inputs(root, ablation={}, weak={}, audit={})
+
+            for path in paths.values():
+                self.assertEqual(
+                    json.loads(path.read_text(encoding="utf-8")),
+                    {},
+                )
 
 
 if __name__ == "__main__":
