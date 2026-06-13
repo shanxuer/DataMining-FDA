@@ -81,7 +81,12 @@ def _required(mapping: dict[str, Any], key: str, context: str) -> Any:
 def _number(value: Any, context: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{context}: required number is invalid: {value!r}")
-    number = float(value)
+    try:
+        number = float(value)
+    except OverflowError as exc:
+        raise ValueError(
+            f"{context}: required number is invalid: numeric overflow"
+        ) from exc
     if not math.isfinite(number):
         raise ValueError(f"{context}: required number is invalid: {value!r}")
     return number
@@ -288,7 +293,7 @@ def _dashboard_data(
             )
         quarter_total += quarter_n
         positive_total += positive
-    if by_quarter and quarter_total != total:
+    if quarter_total != total:
         raise ValueError(
             "audit.by_quarter sum of n "
             f"({quarter_total}) does not equal audit.total ({total})"

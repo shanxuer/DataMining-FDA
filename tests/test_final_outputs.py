@@ -1188,6 +1188,22 @@ class DashboardTests(unittest.TestCase):
                         audit,
                     )
 
+    def test_dashboard_rejects_empty_quarters_when_total_is_positive(self):
+        audit = {
+            "total": 1,
+            "by_quarter": {},
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"audit\.by_quarter.*sum.*audit\.total",
+        ):
+            dashboard._dashboard_data(
+                sample_ablation(),
+                sample_weak(),
+                audit,
+            )
+
     def test_dashboard_accepts_zero_total_with_zero_quarters(self):
         audit = {
             "total": 0,
@@ -1203,6 +1219,22 @@ class DashboardTests(unittest.TestCase):
         )
 
         self.assertEqual(data["serious_rate"], 0.0)
+
+    def test_dashboard_wraps_numeric_overflow_with_metric_context(self):
+        ablation = sample_ablation()
+        ablation["experiments"]["all_tokens"]["split_metrics"]["test"][
+            "auroc"
+        ] = 10**10000
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"ablation\.experiments\.all_tokens\.split_metrics\.test\.auroc",
+        ):
+            dashboard._dashboard_data(
+                ablation,
+                sample_weak(),
+                sample_audit(),
+            )
 
     def test_dashboard_rejects_rule_fires_above_total(self):
         weak = sample_weak()
