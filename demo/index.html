@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FAERS 终期实验 Dashboard</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #20231f;
+      --muted: #646a62;
+      --line: #d8ddd5;
+      --surface: #ffffff;
+      --soft: #f3f5f1;
+      --header: #1b211d;
+      --green: #23865f;
+      --red: #c64b48;
+      --blue: #3976b8;
+      --gold: #b48118;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--soft);
+      color: var(--ink);
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI",
+        "PingFang SC", "Microsoft YaHei", sans-serif;
+      letter-spacing: 0;
+    }
+    header {
+      min-height: 68px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      padding: 14px max(24px, calc((100% - 1180px) / 2));
+      background: var(--header);
+      color: #f7faf6;
+      border-bottom: 3px solid var(--green);
+    }
+    header h1 { margin: 0; font-size: 21px; font-weight: 680; }
+    header p { margin: 2px 0 0; color: #bfc7bd; font-size: 12px; }
+    .status {
+      flex: 0 0 auto;
+      padding: 5px 8px;
+      border: 1px solid #637068;
+      border-radius: 4px;
+      color: #dce5da;
+      font-size: 12px;
+    }
+    main {
+      width: min(1180px, calc(100% - 32px));
+      margin: 22px auto 44px;
+    }
+    section { margin-top: 30px; }
+    h2 { margin: 0 0 12px; font-size: 17px; }
+    .section-note { margin: -7px 0 14px; color: var(--muted); }
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .summary-item {
+      min-height: 92px;
+      padding: 14px;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+    }
+    .summary-label { color: var(--muted); font-size: 12px; }
+    .summary-value {
+      display: block;
+      margin-top: 9px;
+      font-size: 21px;
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+    .chart {
+      background: var(--surface);
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+    }
+    .chart-row {
+      display: grid;
+      grid-template-columns: minmax(180px, 1.3fr) repeat(3, minmax(130px, 1fr));
+      gap: 16px;
+      align-items: center;
+      min-height: 76px;
+      padding: 11px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    .chart-row:last-child { border-bottom: 0; }
+    .model-name { font-weight: 650; overflow-wrap: anywhere; }
+    .model-description { color: var(--muted); font-size: 12px; }
+    .metric-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 12px;
+    }
+    .bar-track {
+      width: 100%;
+      height: 10px;
+      margin-top: 5px;
+      overflow: hidden;
+      background: #e3e7e1;
+      border-radius: 3px;
+    }
+    .bar-fill { height: 100%; border-radius: 3px; }
+    .auroc { background: var(--green); }
+    .auprc { background: var(--blue); }
+    .f1 { background: var(--gold); }
+    .weak-summary {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 1px;
+      background: var(--line);
+      border: 1px solid var(--line);
+    }
+    .weak-stat {
+      min-height: 78px;
+      padding: 12px;
+      background: var(--surface);
+    }
+    .weak-stat span { display: block; color: var(--muted); font-size: 12px; }
+    .weak-stat strong { display: block; margin-top: 7px; font-size: 18px; }
+    .table-wrap {
+      width: 100%;
+      margin-top: 14px;
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      background: var(--surface);
+    }
+    table { width: 100%; min-width: 660px; border-collapse: collapse; }
+    th, td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #e9ede7;
+      color: #3f453e;
+      font-size: 12px;
+      font-weight: 650;
+    }
+    tbody tr:last-child td { border-bottom: 0; }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
+    select {
+      min-width: 210px;
+      height: 36px;
+      padding: 0 30px 0 9px;
+      border: 1px solid #aeb5ac;
+      border-radius: 4px;
+      background: var(--surface);
+      color: var(--ink);
+      font: inherit;
+    }
+    .error-type {
+      display: inline-block;
+      min-width: 48px;
+      padding: 2px 5px;
+      border-radius: 3px;
+      color: #fff;
+      text-align: center;
+      font-size: 11px;
+    }
+    .false-positive { background: var(--red); }
+    .false-negative { background: var(--blue); }
+    .empty {
+      padding: 28px 12px;
+      color: var(--muted);
+      text-align: center;
+    }
+    .boundary {
+      padding: 14px 16px;
+      border-left: 4px solid var(--gold);
+      background: #fff9e8;
+      color: #514525;
+    }
+    @media (max-width: 900px) {
+      .summary-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .weak-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .chart-row { grid-template-columns: minmax(160px, 1fr) 1fr; }
+    }
+    @media (max-width: 600px) {
+      header { align-items: flex-start; padding: 12px 16px; }
+      header h1 { font-size: 18px; }
+      .status { display: none; }
+      main { width: min(100% - 20px, 1180px); margin-top: 14px; }
+      .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .weak-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .chart-row {
+        grid-template-columns: 1fr;
+        gap: 9px;
+        padding: 13px 10px;
+      }
+      .controls { display: grid; grid-template-columns: 1fr 1fr; }
+      select { width: 100%; min-width: 0; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>FAERS 终期实验 Dashboard</h1>
+      <p>消融实验、弱监督审计与失败案例</p>
+    </div>
+    <div class="status">离线结果快照</div>
+  </header>
+  <main>
+    <section aria-labelledby="summary-title">
+      <h2 id="summary-title">实验概览</h2>
+      <div class="summary-grid" id="summary-grid"></div>
+    </section>
+
+    <section aria-labelledby="models-title">
+      <h2 id="models-title">模型与消融对比</h2>
+      <p class="section-note">测试集指标统一使用验证集选择的阈值。</p>
+      <div class="chart" id="model-chart"></div>
+    </section>
+
+    <section aria-labelledby="weak-title">
+      <h2 id="weak-title">弱监督审计</h2>
+      <div class="weak-summary" id="weak-summary"></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>规则</th><th>触发数</th><th>覆盖率</th><th>准确率</th></tr>
+          </thead>
+          <tbody id="rules-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section aria-labelledby="errors-title">
+      <h2 id="errors-title">失败案例</h2>
+      <div class="controls">
+        <label>模型
+          <select id="model-filter" aria-label="按模型筛选">
+            <option value="all">全部模型</option>
+          </select>
+        </label>
+        <label>错误类型
+          <select id="error-filter" aria-label="按错误类型筛选">
+            <option value="all">全部</option>
+            <option value="false_positive">假阳性</option>
+            <option value="false_negative">假阴性</option>
+          </select>
+        </label>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>模型</th><th>类型</th><th>病例 ID</th>
+              <th>概率</th><th>真实标签</th><th>Token 摘要</th>
+            </tr>
+          </thead>
+          <tbody id="errors-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section aria-labelledby="boundary-title">
+      <h2 id="boundary-title">结果解释边界</h2>
+      <div class="boundary">
+        FAERS 属于自发报告数据，模型结果用于病例级重症识别和特征贡献审计，
+        不能直接解释为药物因果关系或真实发生率。反应术语与结果字段可能形成语义捷径；
+        弱监督指标只代表规则覆盖子集。
+      </div>
+    </section>
+  </main>
+
+  <script id="dashboard-data" type="application/json">{"total":1617443,"serious_rate":0.5686228200931965,"models":[{"name":"all_tokens","description":"Structured, binned, and all text token families","auroc":0.9860726645214876,"auprc":0.9879236195041715,"f1":0.9594408596130248},{"name":"without_reaction_pt","description":"All features except reaction PT tokens","auroc":0.9779441829996532,"auprc":0.9814122672988075,"f1":0.9506007884610844},{"name":"without_reaction_outcome","description":"All features except reaction outcome tokens","auroc":0.9857242366296902,"auprc":0.9870239965557287,"f1":0.9589906248245664},{"name":"drug_indication_only","description":"Drug and indication text tokens only","auroc":0.8581320746964254,"auprc":0.8759523378098953,"f1":0.8162456360994862},{"name":"structured_only","description":"Demographic, source, quarter, and count-bin tokens only","auroc":0.9676523945383119,"auprc":0.9734263745973686,"f1":0.9482102523235362},{"name":"numeric_logistic","description":"Existing numeric logistic baseline","auroc":0.777494786166046,"auprc":0.8101372073113327,"f1":0.7540655962501064}],"best":{"name":"all_tokens","description":"Structured, binned, and all text token families","auroc":0.9860726645214876,"auprc":0.9879236195041715,"f1":0.9594408596130248},"weak":{"coverage":0.43196576324482533,"conflict":0.021242915211541764,"accuracy":0.7478496369023073,"precision":0.7472310356251217,"recall":0.9471650656080487,"f1":0.8354022207288389,"rules":[{"name":"death_or_fatal_reaction_term","fires":65442,"coverage":0.040460158410528226,"accuracy":0.9855750129886006},{"name":"high_polypharmacy_10plus","fires":176176,"coverage":0.10892254008332905,"accuracy":0.778738307147398},{"name":"senior_with_multiple_suspect_drugs","fires":174466,"coverage":0.10786531581020166,"accuracy":0.7310593468068277},{"name":"low_complexity_younger_case","fires":71204,"coverage":0.04402257142910137,"accuracy":0.5901353856524915},{"name":"high_risk_reaction","fires":20028,"coverage":0.012382507451576347,"accuracy":0.9962053125624126},{"name":"serious_reaction_outcome","fires":388680,"coverage":0.2403052225024313,"accuracy":0.7609833281877123},{"name":"extreme_polypharmacy_30plus","fires":26394,"coverage":0.016318349394692733,"accuracy":0.9321436690156853},{"name":"device_product_issue","fires":46801,"coverage":0.028935177313821878,"accuracy":0.8625456721010235}]},"errors":[{"safetyreportid":"26115179","receivedate":"20251203","patientsex":"2","age_years":"63","drug_count":"1","reaction_count":"3","indication_count":"1","tokens":"actiondrug:6 drug:HUMAN_IMMUNOGLOBULIN_G drugchar:1 indi:SECONDARY_IMMUNODEFICIENCY reac:ACUTE_RESPIRATORY_FAILURE reac:HAEMOTHORAX reac:HODGKIN_S_DISEASE reactionoutcome:5 route:058","predicted_probability":0.9999653278235845,"predicted_label":1,"true_label":0,"model":"all_tokens","type":"false_positive"},{"safetyreportid":"26077268","receivedate":"20251121","patientsex":"1","age_years":"77","drug_count":"1","reaction_count":"6","indication_count":"0","tokens":"actiondrug:5 drug:CHLORHEXIDINE_GLUCONATE drugchar:1 reac:ANAPHYLACTIC_REACTION reac:DIZZINESS reac:DYSPNOEA reac:HEAD_INJURY reac:SEIZURE reac:VOMITING reactionoutcome:1 route:061","predicted_probability":0.9999627680982502,"predicted_label":1,"true_label":0,"model":"all_tokens","type":"false_positive"},{"safetyreportid":"26122408","receivedate":"20251204","patientsex":"1","age_years":"","drug_count":"4","reaction_count":"1","indication_count":"1","tokens":"actiondrug:6 drug:ALPHA_1_PROTEINASE_INHIBITOR_HUMAN drugchar:1 indi:ALPHA_1_ANTITRYPSIN_DEFICIENCY reac:ALPHA_1_ANTITRYPSIN_DEFICIENCY reactionoutcome:5 route:042 route:065","predicted_probability":0.9999252811242589,"predicted_label":1,"true_label":0,"model":"all_tokens","type":"false_positive"},{"safetyreportid":"26044838","receivedate":"20251114","patientsex":"2","age_years":"32","drug_count":"1","reaction_count":"8","indication_count":"1","tokens":"actiondrug:6 drug:OMALIZUMAB drugchar:1 indi:PRODUCT_USED_FOR_UNKNOWN_INDICATION reac:DEVICE_DEFECTIVE reac:DEVICE_ISSUE reac:DEVICE_MALFUNCTION reac:NO_ADVERSE_EVENT reac:PRODUCT_COMMUNICATION_ISSUE reac:PRODUCT_QUALITY_ISSUE reac:UNDERDOSE reac:WRONG_TECHNIQUE_IN_DEVICE_USAGE_PROCESS","predicted_probability":0.0012680486748208857,"predicted_label":0,"true_label":1,"model":"all_tokens","type":"false_negative"},{"safetyreportid":"26018971","receivedate":"20251110","patientsex":"","age_years":"","drug_count":"1","reaction_count":"1","indication_count":"1","tokens":"actiondrug:6 drug:ONABOTULINUMTOXINA drugchar:1 indi:PRODUCT_USED_FOR_UNKNOWN_INDICATION reac:ADVERSE_DRUG_REACTION reactionoutcome:6 route:065","predicted_probability":0.0027103508994624705,"predicted_label":0,"true_label":1,"model":"all_tokens","type":"false_negative"},{"safetyreportid":"26195461","receivedate":"20251224","patientsex":"","age_years":"","drug_count":"1","reaction_count":"1","indication_count":"1","tokens":"actiondrug:5 drug:OCRELIZUMAB drugchar:1 indi:PRODUCT_USED_FOR_UNKNOWN_INDICATION reac:APPENDICITIS reactionoutcome:6","predicted_probability":0.0030260209977087775,"predicted_label":0,"true_label":1,"model":"all_tokens","type":"false_negative"},{"safetyreportid":"26115179","receivedate":"20251203","patientsex":"2","age_years":"63","drug_count":"1","reaction_count":"3","indication_count":"1","tokens":"actiondrug:6 drug:HUMAN_IMMUNOGLOBULIN_G drugchar:1 indi:SECONDARY_IMMUNODEFICIENCY reac:ACUTE_RESPIRATORY_FAILURE reac:HAEMOTHORAX reac:HODGKIN_S_DISEASE reactionoutcome:5 route:058","predicted_probability":0.9999756106250812,"predicted_label":1,"true_label":0,"model":"without_reaction_pt","type":"false_positive"},{"safetyreportid":"26122408","receivedate":"20251204","patientsex":"1","age_years":"","drug_count":"4","reaction_count":"1","indication_count":"1","tokens":"actiondrug:6 drug:ALPHA_1_PROTEINASE_INHIBITOR_HUMAN drugchar:1 indi:ALPHA_1_ANTITRYPSIN_DEFICIENCY reac:ALPHA_1_ANTITRYPSIN_DEFICIENCY reactionoutcome:5 route:042 route:065","predicted_probability":0.9999618370697131,"predicted_label":1,"true_label":0,"model":"without_reaction_pt","type":"false_positive"},{"safetyreportid":"26009818","receivedate":"20251107","patientsex":"2","age_years":"36","drug_count":"5","reaction_count":"30","indication_count":"1","tokens":"actiondrug:1 drug:NATALIZUMAB drugchar:1 indi:MULTIPLE_SCLEROSIS reac:ABDOMINAL_PAIN_UPPER reac:ASTHENIA reac:BRONCHITIS reac:CHROMATURIA reac:CLUMSINESS reac:CONSTIPATION reac:COUGH reac:FATIGUE","predicted_probability":0.9998436092028821,"predicted_label":1,"true_label":0,"model":"without_reaction_pt","type":"false_positive"},{"safetyreportid":"26069642","receivedate":"20251120","patientsex":"2","age_years":"","drug_count":"2","reaction_count":"3","indication_count":"2","tokens":"actiondrug:5 drug:ESTRADIOL drugchar:1 indi:HYSTERECTOMY indi:MENOPAUSE reac:BREAST_ENLARGEMENT reac:MUSCLE_SPASMS reac:PRODUCT_AVAILABILITY_ISSUE reactionoutcome:6 route:062","predicted_probability":0.001462610968918988,"predicted_label":0,"true_label":1,"model":"without_reaction_pt","type":"false_negative"},{"safetyreportid":"26184716","receivedate":"20251222","patientsex":"","age_years":"","drug_count":"1","reaction_count":"1","indication_count":"1","tokens":"actiondrug:5 drug:OCRELIZUMAB drugchar:1 indi:PRODUCT_USED_FOR_UNKNOWN_INDICATION reac:BREAST_CANCER reactionoutcome:6","predicted_probability":0.0017681103386853224,"predicted_label":0,"true_label":1,"model":"without_reaction_pt","type":"false_negative"},{"safetyreportid":"26195461","receivedate":"20251224","patientsex":"","age_years":"","drug_count":"1","reaction_count":"1","indication_count":"1","tokens":"actiondrug:5 drug:OCRELIZUMAB drugchar:1 indi:PRODUCT_USED_FOR_UNKNOWN_INDICATION reac:APPENDICITIS reactionoutcome:6","predicted_probability":0.0017681103386853224,"predicted_label":0,"true_label":1,"model":"without_reaction_pt","type":"false_negative"},{"safetyreportid":"26077268","receivedate":"20251121","patientsex":"1","age_years":"77","drug_count":"1","reaction_count":"6","indication_count":"0","tokens":"actiondrug:5 drug:CHLORHEXIDINE_GLUCONATE drugchar:1 reac:ANAPHYLACTIC_REACTION reac:DIZZINESS reac:DYSPNOEA reac:HEAD_INJURY reac:SEIZURE reac:VOMITING reactionoutcome:1 route:061","predicted_probability":0.9999698563596227,"predicted_label":1,"true_label":0,"model":"without_reaction_outcome","type":"false_positive"},{"safetyreportid":"26001533","receivedate":"20251105","patientsex":"1","age_years":"75","drug_count":"3","reaction_count":"20","indication_count":"1","tokens":"drug:AMOXICILLIN_CLAVULANATE_POTASSIUM drug:PIPERACILLIN_SODIUM_TAZOBACTAM_SODIUM drug:VANCOMYCIN drugchar:1 indi:POSTOPERATIVE_WOUND_INFECTION reac:AGONAL_RESPIRATION reac:ANAPHYLACTIC_REACTION reac:APNOEA reac:BLOOD_PRESSURE_DECREASED reac:BUNDLE_BRANCH_BLOCK_RIGHT reac:CARDIAC_ARREST reac:ELECTROCARDIOGRAM_Q_WAVE_ABNORMAL","predicted_probability":0.9999135425204168,"predicted_label":1,"true_label":0,"model":"without_reaction_outcome","type":"false_positive"},{"safetyreportid":"26051098","receivedate":"20251117","patientsex":"2","age_years":"76","drug_count":"2","reaction_count":"5","indication_count":"1","tokens":"actiondrug:2 drug:FOSCARBIDOPA_FOSLEVODOPA drugchar:1 indi:PARKINSON_S_DISEASE reac:CRANIOFACIAL_FRACTURE reac:FALL reac:HALLUCINATION reac:JAW_FRACTURE reac:SKULL_FRACTURE reactionoutcome:1 reactionoutcome:3 route:058","predicted_probability":0.9998016700066467,"predicted_label":1,"true_label":0,"model":"without_reaction_outcome","type":"false_positive"},{"safetyreportid":"26044838","receivedate":"20251114","patientsex":"2","age_years":"32","drug_count":"1","reaction_count":"8","indication_count":"1","tokens":"actiondrug:6 drug:OMALIZUMAB drugchar:1 indi:PRODUCT_USED_FOR_UNKNOWN_INDICATION reac:DEVICE_DEFECTIVE reac:DEVICE_ISSUE reac:DEVICE_MALFUNCTION reac:NO_ADVERSE_EVENT reac:PRODUCT_COMMUNICATION_ISSUE reac:PRODUCT_QUALITY_ISSUE reac:UNDERDOSE reac:WRONG_TECHNIQUE_IN_DEVICE_USAGE_PROCESS","predicted_probability":0.001161920409304422,"predicted_label":0,"true_label":1,"model":"without_reaction_outcome","type":"false_negative"},{"safetyreportid":"26195461","receivedate":"20251224","patientsex":"","age_years":"","drug_count":"1","reaction_count":"1","indication_count":"1","tokens":"actiondrug:5 drug:OCRELIZUMAB drugchar:1 indi:PRODUCT_USED_FOR_UNKNOWN_INDICATION reac:APPENDICITIS reactionoutcome:6","predicted_probability":0.0029730715449910435,"predicted_label":0,"true_label":1,"model":"without_reaction_outcome","type":"false_negative"},{"safetyreportid":"26018971","receivedate":"20251110","patientsex":"","age_years":"","drug_count":"1","reaction_count":"1","indication_count":"1","tokens":"actiondrug:6 drug:ONABOTULINUMTOXINA drugchar:1 indi:PRODUCT_USED_FOR_UNKNOWN_INDICATION reac:ADVERSE_DRUG_REACTION reactionoutcome:6 route:065","predicted_probability":0.003200669350096822,"predicted_label":0,"true_label":1,"model":"without_reaction_outcome","type":"false_negative"},{"safetyreportid":"26197054","receivedate":"20251224","patientsex":"","age_years":"","drug_count":"42","reaction_count":"2","indication_count":"1","tokens":"actiondrug:1 drug:CYCLOPHOSPHAMIDE drug:CYTARABINE drug:DEXAMETHASONE drug:DOXORUBICIN drug:METHOTREXATE drug:RITUXIMAB drug:VINCRISTINE drugchar:1 indi:B_CELL_TYPE_ACUTE_LEUKAEMIA reac:INTENTIONAL_PRODUCT_USE_ISSUE reac:THERAPY_PARTIAL_RESPONDER","predicted_probability":0.9984888962612752,"predicted_label":1,"true_label":0,"model":"drug_indication_only","type":"false_positive"},{"safetyreportid":"26082236","receivedate":"20251124","patientsex":"1","age_years":"28","drug_count":"53","reaction_count":"1","indication_count":"2","tokens":"actiondrug:2 actiondrug:6 drug:AMLODIPINE_BESYLATE drug:AMOXICILLIN_CLAVULANIC_ACID drug:ATORVASTATIN drug:BENZTROPINE drug:CARBAMAZEPINE drug:CLONAZEPAM drug:CLOZAPINE drug:DESMOPRESSIN drug:DIAZEPAM drug:HALOPERIDOL","predicted_probability":0.998199105448914,"predicted_label":1,"true_label":0,"model":"drug_indication_only","type":"false_positive"},{"safetyreportid":"26121427","receivedate":"20251204","patientsex":"","age_years":"","drug_count":"5","reaction_count":"2","indication_count":"1","tokens":"actiondrug:5 drug:CYCLOPHOSPHAMIDE drug:FLUDARABINE_PHOSPHATE drug:RITUXIMAB drug:VENETOCLAX drugchar:1 indi:CHRONIC_LYMPHOCYTIC_LEUKAEMIA reac:HERPES_SIMPLEX reac:LYMPHADENITIS_VIRAL reactionoutcome:1","predicted_probability":0.9979430482931002,"predicted_label":1,"true_label":0,"model":"drug_indication_only","type":"false_positive"},{"safetyreportid":"26100092","receivedate":"20251128","patientsex":"2","age_years":"","drug_count":"4","reaction_count":"6","indication_count":"1","tokens":"actiondrug:5 drug:CENEGERMIN_BKBJ drugchar:1 indi:NEUROTROPHIC_KERATOPATHY reac:ATRIAL_FIBRILLATION reac:CARDIAC_DISORDER reac:COUGH reac:PNEUMONIA reac:PRODUCT_DOSE_OMISSION_ISSUE reac:PULMONARY_HAEMORRHAGE reactionoutcome:2 reactionoutcome:6","predicted_probability":0.008578758587467024,"predicted_label":0,"true_label":1,"model":"drug_indication_only","type":"false_negative"},{"safetyreportid":"26188786","receivedate":"20251222","patientsex":"1","age_years":"72","drug_count":"4","reaction_count":"1","indication_count":"1","tokens":"actiondrug:1 drug:BIMATOPROST drug:CENEGERMIN_BKBJ drug:DORZOLAMIDE_HYDROCHLORIDE_TIMOLOL_MALEATE drug:MOXIFLOXACIN drugchar:1 drugchar:2 indi:NEUROTROPHIC_KERATOPATHY reac:EYE_EXCISION reactionoutcome:6 route:047","predicted_probability":0.01593004237841092,"predicted_label":0,"true_label":1,"model":"drug_indication_only","type":"false_negative"},{"safetyreportid":"26047216","receivedate":"20251114","patientsex":"2","age_years":"","drug_count":"4","reaction_count":"5","indication_count":"3","tokens":"actiondrug:1 drug:CENEGERMIN_BKBJ drug:CYCLOSPORINE drugchar:1 drugchar:2 indi:DRY_EYE indi:KERATONEURALGIA indi:NEUROTROPHIC_KERATOPATHY reac:BLINDNESS reac:EYE_IRRITATION reac:EYE_PAIN reac:GAIT_DISTURBANCE","predicted_probability":0.016971894851340638,"predicted_label":0,"true_label":1,"model":"drug_indication_only","type":"false_negative"},{"safetyreportid":"26011366","receivedate":"20251107","patientsex":"1","age_years":"42","drug_count":"2","reaction_count":"11","indication_count":"1","tokens":"actiondrug:4 drug:NATALIZUMAB drugchar:1 indi:MULTIPLE_SCLEROSIS reac:DEPRESSION reac:DIPLOPIA reac:FATIGUE reac:MULTIPLE_SCLEROSIS reac:PRESCRIBED_UNDERDOSE reac:RASH_MACULAR reac:RHINORRHOEA reac:SINUSITIS","predicted_probability":0.99983768977694,"predicted_label":1,"true_label":0,"model":"structured_only","type":"false_positive"},{"safetyreportid":"26153101","receivedate":"20251214","patientsex":"2","age_years":"45","drug_count":"6","reaction_count":"14","indication_count":"1","tokens":"actiondrug:4 drug:NATALIZUMAB drugchar:1 indi:RELAPSING_REMITTING_MULTIPLE_SCLEROSIS reac:BACTERIAL_INFECTION reac:BACTERIAL_VAGINOSIS reac:COUGH reac:EAR_SWELLING reac:FUNGAL_INFECTION reac:INFLUENZA reac:NASOPHARYNGITIS reac:OCULAR_DEMODICOSIS","predicted_probability":0.9998082399122014,"predicted_label":1,"true_label":0,"model":"structured_only","type":"false_positive"},{"safetyreportid":"26009818","receivedate":"20251107","patientsex":"2","age_years":"36","drug_count":"5","reaction_count":"30","indication_count":"1","tokens":"actiondrug:1 drug:NATALIZUMAB drugchar:1 indi:MULTIPLE_SCLEROSIS reac:ABDOMINAL_PAIN_UPPER reac:ASTHENIA reac:BRONCHITIS reac:CHROMATURIA reac:CLUMSINESS reac:CONSTIPATION reac:COUGH reac:FATIGUE","predicted_probability":0.9997871518709445,"predicted_label":1,"true_label":0,"model":"structured_only","type":"false_positive"},{"safetyreportid":"26017651","receivedate":"20251110","patientsex":"","age_years":"","drug_count":"1","reaction_count":"1","indication_count":"1","tokens":"actiondrug:6 drug:DIAZEPAM drugchar:1 indi:PRODUCT_USED_FOR_UNKNOWN_INDICATION reac:DEVICE_MALFUNCTION reactionoutcome:6 route:065","predicted_probability":0.0013737090022806545,"predicted_label":0,"true_label":1,"model":"structured_only","type":"false_negative"},{"safetyreportid":"26206575","receivedate":"20251229","patientsex":"","age_years":"","drug_count":"1","reaction_count":"2","indication_count":"1","tokens":"actiondrug:6 drug:DIAZEPAM drugchar:1 indi:PRODUCT_USED_FOR_UNKNOWN_INDICATION reac:DEVICE_MALFUNCTION reac:PRODUCT_QUALITY_ISSUE reactionoutcome:6 route:065","predicted_probability":0.001963827668007269,"predicted_label":0,"true_label":1,"model":"structured_only","type":"false_negative"},{"safetyreportid":"26154570","receivedate":"20251215","patientsex":"","age_years":"","drug_count":"7","reaction_count":"1","indication_count":"1","tokens":"actiondrug:1 drug:ROPEGINTERFERON_ALFA_2B_NJFT drugchar:1 indi:POLYCYTHAEMIA_VERA reac:NEUTROPENIA reactionoutcome:6","predicted_probability":0.0026653763677055237,"predicted_label":0,"true_label":1,"model":"structured_only","type":"false_negative"},{"safetyreportid":"26212263","receivedate":"20251230","patientsex":"1","age_years":"6","drug_count":"70","reaction_count":"3","indication_count":"20","tokens":"actiondrug:4 drug:ACETAMINOPHEN drug:ACYCLOVIR_SODIUM drug:ALBUTEROL drug:ALTEPLASE drug:BUSULFAN drug:CALCIUM_CHLORIDE_POTASSIUM_CHLORIDE_SODIUM_CHLORIDE_SODIUM_LACTATE drug:CEFEPIME_HYDROCHLORIDE drug:CHLORHEXIDINE drug:CYCLOPHOSPHAMIDE drug:DESITIN_COD_LIVER_OIL_ZINC_OXIDE drug:DEXAMETHASONE","predicted_probability":0.9492917195404831,"predicted_label":1,"true_label":0,"model":"numeric_logistic","type":"false_positive"},{"safetyreportid":"26059094","receivedate":"20251118","patientsex":"","age_years":"","drug_count":"34","reaction_count":"3","indication_count":"24","tokens":"actiondrug:4 drug:ALBUTEROL drug:ALPHA_TOCOPHEROL drug:BACLOFEN drug:BROMELAINS drug:BUPRENORPHINE_HYDROCHLORIDE drug:CELECOXIB drug:CETIRIZINE_HYDROCHLORIDE drug:DIAZEPAM drug:DICYCLOMINE_HYDROCHLORIDE drug:DILTIAZEM_HYDROCHLORIDE drug:DOCUSATE_SODIUM","predicted_probability":0.8610522757895521,"predicted_label":1,"true_label":0,"model":"numeric_logistic","type":"false_positive"},{"safetyreportid":"26020501","receivedate":"20251110","patientsex":"2","age_years":"84","drug_count":"34","reaction_count":"3","indication_count":"27","tokens":"actiondrug:6 drug:ACETAMINOPHEN drug:ALBUTEROL_SULFATE drug:AZITHROMYCIN_DIHYDRATE drug:BIFIDOBACTERIUM_ANIMALIS_LACTIS drug:BIOTIN drug:CARBOXYMETHYLCELLULOSE_SODIUM drug:CHOLECALCIFEROL drug:CHOLECALCIFEROL_GENISTEIN_ZINC_GLYCINATE drug:CO_Q_10_UBIDECARENONE drug:CURCUMIN drug:DICLOFENAC_SODIUM","predicted_probability":0.8481304111160128,"predicted_label":1,"true_label":0,"model":"numeric_logistic","type":"false_positive"},{"safetyreportid":"26167880","receivedate":"20251217","patientsex":"2","age_years":"10","drug_count":"1","reaction_count":"1","indication_count":"0","tokens":"actiondrug:5 drug:DUPILUMAB drugchar:1 reac:STAPHYLOCOCCAL_SEPSIS reactionoutcome:3","predicted_probability":0.3207658025328138,"predicted_label":0,"true_label":1,"model":"numeric_logistic","type":"false_negative"},{"safetyreportid":"26217079","receivedate":"20251231","patientsex":"1","age_years":"0.666667","drug_count":"2","reaction_count":"2","indication_count":"0","tokens":"actiondrug:5 drug:BUDESONIDE drug:FENOTEROL_HYDROBROMIDE_IPRATROPIUM_BROMIDE drugchar:1 drugchar:2 reac:ASTHMA reac:DRUG_INEFFECTIVE reactionoutcome:3 reactionoutcome:6 route:065","predicted_probability":0.326602617254587,"predicted_label":0,"true_label":1,"model":"numeric_logistic","type":"false_negative"},{"safetyreportid":"26065859","receivedate":"20251119","patientsex":"1","age_years":"0.583333","drug_count":"1","reaction_count":"1","indication_count":"1","tokens":"actiondrug:5 drug:DUPILUMAB drugchar:1 indi:DERMATITIS_ATOPIC reac:ASTHMA reactionoutcome:6 route:065","predicted_probability":0.3293529728325906,"predicted_label":0,"true_label":1,"model":"numeric_logistic","type":"false_negative"}],"display":{"best_auroc":"0.9861","weak_coverage":"43.20%"}}</script>
+  <script>
+    "use strict";
+    const data = JSON.parse(document.getElementById("dashboard-data").textContent);
+    const formatMetric = value => Number(value).toFixed(4);
+    const formatPercent = value => `${(Number(value) * 100).toFixed(2)}%`;
+    const formatCount = value => Number(value).toLocaleString("zh-CN");
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    const summaryItems = [
+      ["病例数", formatCount(data.total)],
+      ["重症率", formatPercent(data.serious_rate)],
+      ["最佳模型", data.best.name],
+      ["AUROC", data.display.best_auroc],
+      ["AUPRC", formatMetric(data.best.auprc)]
+    ];
+    const summaryGrid = document.getElementById("summary-grid");
+    summaryItems.forEach(([label, value]) => {
+      const item = document.createElement("div");
+      item.className = "summary-item";
+      const labelNode = document.createElement("span");
+      labelNode.className = "summary-label";
+      labelNode.textContent = label;
+      const valueNode = document.createElement("strong");
+      valueNode.className = "summary-value";
+      valueNode.textContent = value;
+      item.append(labelNode, valueNode);
+      summaryGrid.appendChild(item);
+    });
+
+    function metricBar(label, value, className) {
+      const width = Math.max(0, Math.min(100, Number(value) * 100));
+      return `<div>
+        <div class="metric-head"><span>${escapeHtml(label)}</span>
+          <strong>${escapeHtml(formatMetric(value))}</strong></div>
+        <div class="bar-track"><div class="bar-fill ${className}"
+          style="width:${width.toFixed(2)}%"></div></div>
+      </div>`;
+    }
+    const chart = document.getElementById("model-chart");
+    data.models.forEach(model => {
+      const row = document.createElement("div");
+      row.className = "chart-row";
+      row.innerHTML = `<div>
+        <div class="model-name">${escapeHtml(model.name)}</div>
+        <div class="model-description">${escapeHtml(model.description)}</div>
+      </div>
+      ${metricBar("AUROC", model.auroc, "auroc")}
+      ${metricBar("AUPRC", model.auprc, "auprc")}
+      ${metricBar("F1", model.f1, "f1")}`;
+      chart.appendChild(row);
+    });
+
+    const weakItems = [
+      ["覆盖率", data.display.weak_coverage, false],
+      ["冲突率", data.weak.conflict, true],
+      ["Accuracy", data.weak.accuracy, true],
+      ["Precision", data.weak.precision, true],
+      ["Recall", data.weak.recall, true],
+      ["F1", data.weak.f1, false]
+    ];
+    const weakSummary = document.getElementById("weak-summary");
+    weakItems.forEach(([label, value, percent]) => {
+      const item = document.createElement("div");
+      item.className = "weak-stat";
+      const labelNode = document.createElement("span");
+      labelNode.textContent = label;
+      const valueNode = document.createElement("strong");
+      valueNode.textContent = typeof value === "string"
+        ? value
+        : (percent ? formatPercent(value) : formatMetric(value));
+      item.append(labelNode, valueNode);
+      weakSummary.appendChild(item);
+    });
+
+    document.getElementById("rules-body").innerHTML = data.weak.rules
+      .map(rule => `<tr>
+        <td>${escapeHtml(rule.name)}</td>
+        <td>${escapeHtml(formatCount(rule.fires))}</td>
+        <td>${escapeHtml(formatPercent(rule.coverage))}</td>
+        <td>${escapeHtml(formatPercent(rule.accuracy))}</td>
+      </tr>`).join("");
+
+    const modelFilter = document.getElementById("model-filter");
+    data.models.forEach(model => {
+      const option = document.createElement("option");
+      option.value = model.name;
+      option.textContent = model.name;
+      modelFilter.appendChild(option);
+    });
+    const errorFilter = document.getElementById("error-filter");
+    const errorsBody = document.getElementById("errors-body");
+    function renderErrors() {
+      const rows = data.errors.filter(item =>
+        (modelFilter.value === "all" || item.model === modelFilter.value) &&
+        (errorFilter.value === "all" || item.type === errorFilter.value)
+      );
+      if (rows.length === 0) {
+        errorsBody.innerHTML =
+          '<tr><td class="empty" colspan="6">暂无符合筛选条件的失败案例</td></tr>';
+        return;
+      }
+      errorsBody.innerHTML = rows.map(item => {
+        const isPositive = item.type === "false_positive";
+        const typeLabel = isPositive ? "假阳性" : "假阴性";
+        const typeClass = isPositive ? "false-positive" : "false-negative";
+        const probability = Number.isFinite(Number(item.predicted_probability))
+          ? formatMetric(item.predicted_probability) : "—";
+        return `<tr>
+          <td>${escapeHtml(item.model)}</td>
+          <td><span class="error-type ${typeClass}">${typeLabel}</span></td>
+          <td>${escapeHtml(item.safetyreportid ?? "—")}</td>
+          <td>${escapeHtml(probability)}</td>
+          <td>${escapeHtml(item.true_label ?? "—")}</td>
+          <td>${escapeHtml(item.tokens ?? "—")}</td>
+        </tr>`;
+      }).join("");
+    }
+    modelFilter.addEventListener("change", renderErrors);
+    errorFilter.addEventListener("change", renderErrors);
+    renderErrors();
+  </script>
+</body>
+</html>
