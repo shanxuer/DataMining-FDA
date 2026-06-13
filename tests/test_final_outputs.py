@@ -1,6 +1,7 @@
 import csv
 import json
 import math
+import re
 import sys
 import tempfile
 import unittest
@@ -1427,7 +1428,15 @@ FINAL_CASE_FIELDS = [
     "safetyreportid",
     "receivedate",
     "primarysourcecountry",
+    "occurcountry",
+    "reporttype",
+    "fulfillexpeditecriteria",
+    "duplicate",
+    "reportercountry",
+    "qualification",
+    "sendertype",
     "patientsex",
+    "patientagegroup",
     "age_years",
     "drug_count",
     "suspect_drug_count",
@@ -1439,7 +1448,7 @@ FINAL_CASE_FIELDS = [
 
 
 def complete_numeric_baseline():
-    metrics = {
+    shared_metrics = {
         name: value
         for name, value in test_metrics(
             0.75,
@@ -1452,13 +1461,22 @@ def complete_numeric_baseline():
         ).items()
         if name in final_reporting.TEST_METRICS
     }
+    split_counts = {
+        "train": (6, 3),
+        "valid": (2, 1),
+        "test": (2, 1),
+    }
     return {
         "model_path": "outputs/models/numeric_logistic.pkl",
         "train_rows": 6,
         "threshold_from_valid": 0.5,
         "split_metrics": {
-            split: dict(metrics)
-            for split in ("train", "valid", "test")
+            split: {
+                **shared_metrics,
+                "n": n,
+                "positives": positives,
+            }
+            for split, (n, positives) in split_counts.items()
         },
         "error_cases": {
             split: {
@@ -1497,7 +1515,15 @@ def minimal_case_rows():
                     "safetyreportid": f"{quarter}-{split}-{index}",
                     "receivedate": "20250101",
                     "primarysourcecountry": "US",
+                    "occurcountry": "US",
+                    "reporttype": "1",
+                    "fulfillexpeditecriteria": "1",
+                    "duplicate": "0",
+                    "reportercountry": "US",
+                    "qualification": "1",
+                    "sendertype": "2",
                     "patientsex": "1",
+                    "patientagegroup": "5",
                     "age_years": "60",
                     "drug_count": "2",
                     "suspect_drug_count": "1",
@@ -1601,7 +1627,7 @@ class FinalProjectInputValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, r"2025Q1.*2025Q4"):
                 run_final_project.validate_inputs(output_dir)
 
-    def test_validation_rejects_duplicate_and_missing_quarter(self):
+    def test_validation_rejects_invalid_quarter_filename_and_missing_quarter(self):
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp)
             rows = minimal_case_rows()
@@ -1619,9 +1645,43 @@ class FinalProjectInputValidationTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 ValueError,
-                r"duplicate.*2025Q3.*missing.*2025Q4",
+                r"invalid filename.*cases_2025Q3_copy\.csv.*missing.*2025Q4",
             ):
                 run_final_project.validate_inputs(output_dir)
+
+    def test_validation_rejects_non_fullmatch_case_filenames(self):
+        invalid_names = (
+            "cases_2025Q10.csv",
+            "cases_2025Q1_backup.csv",
+        )
+        for invalid_name in invalid_names:
+            with self.subTest(filename=invalid_name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    output_dir = Path(tmp)
+                    write_final_cli_fixture(output_dir)
+                    invalid = output_dir / "interim" / invalid_name
+                    invalid.write_text("invalid", encoding="utf-8")
+
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        rf"invalid filename.*{re.escape(invalid_name)}",
+                    ):
+                        run_final_project.validate_inputs(output_dir)
+
+    def test_validation_accepts_uppercase_csv_extension(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            filenames = {
+                "2025Q1": "cases_2025Q1.CSV",
+                "2025Q2": "cases_2025Q2.csv",
+                "2025Q3": "cases_2025Q3.csv",
+                "2025Q4": "cases_2025Q4.csv",
+            }
+            write_final_cli_fixture(output_dir, filenames=filenames)
+
+            paths, _ = run_final_project.validate_inputs(output_dir)
+
+            self.assertEqual(paths[0].name, "cases_2025Q1.CSV")
 
     def test_validation_rejects_extra_case_csv(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1630,7 +1690,10 @@ class FinalProjectInputValidationTests(unittest.TestCase):
             extra = output_dir / "interim" / "cases_2025Q5.csv"
             extra.write_text("split,label_serious\ntrain,0\n", encoding="utf-8")
 
-            with self.assertRaisesRegex(ValueError, r"extra.*cases_2025Q5.csv"):
+            with self.assertRaisesRegex(
+                ValueError,
+                r"invalid filename.*cases_2025Q5\.csv",
+            ):
                 run_final_project.validate_inputs(output_dir)
 
     def test_numeric_baseline_is_checked_before_csv_schema(self):
@@ -1689,12 +1752,28 @@ class FinalProjectInputValidationTests(unittest.TestCase):
             self.assertIn("text_tokens", message)
             self.assertIn("safetyreportid", message)
 
+    def test_validation_requires_all_structured_consumer_columns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            fieldnames = [
+                field
+                for field in FINAL_CASE_FIELDS
+                if field != "occurcountry"
+            ]
+            write_final_cli_fixture(output_dir, fieldnames=fieldnames)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                r"cases_2025Q1\.csv.*occurcountry",
+            ):
+                run_final_project.validate_inputs(output_dir)
+
     def test_validation_requires_all_splits_and_both_classes(self):
         cases = (
             (
                 "missing valid",
                 lambda rows: [
-                    row.__setitem__("split", "train")
+                    row.__setitem__("split", "test")
                     for row in rows["2025Q4"]
                     if row["split"] == "valid"
                 ],
@@ -1725,6 +1804,70 @@ class FinalProjectInputValidationTests(unittest.TestCase):
                     output_dir = Path(tmp)
                     rows = minimal_case_rows()
                     mutate(rows)
+                    write_final_cli_fixture(output_dir, rows_by_quarter=rows)
+
+                    with self.assertRaisesRegex(ValueError, expected):
+                        run_final_project.validate_inputs(output_dir)
+
+    def test_validation_rejects_noncanonical_split_and_quarter_values(self):
+        cases = (
+            (
+                "split whitespace",
+                lambda rows: rows["2025Q1"][0].__setitem__(
+                    "split",
+                    " train",
+                ),
+                r"unknown split.* train",
+            ),
+            (
+                "quarter whitespace",
+                lambda rows: rows["2025Q1"][0].__setitem__(
+                    "quarter",
+                    "2025Q1 ",
+                ),
+                r"quarter.*2025Q1 .*2025Q1",
+            ),
+            (
+                "lowercase quarter",
+                lambda rows: rows["2025Q1"][0].__setitem__(
+                    "quarter",
+                    "2025q1",
+                ),
+                r"quarter.*2025q1.*2025Q1",
+            ),
+        )
+        for name, mutate, expected in cases:
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    output_dir = Path(tmp)
+                    rows = minimal_case_rows()
+                    mutate(rows)
+                    write_final_cli_fixture(output_dir, rows_by_quarter=rows)
+
+                    with self.assertRaisesRegex(ValueError, expected):
+                        run_final_project.validate_inputs(output_dir)
+
+    def test_validation_enforces_quarter_time_split_policy(self):
+        cases = (
+            (
+                "Q1 test",
+                "2025Q1",
+                "test",
+                r"2025Q1.*only contain split 'train'.*test",
+            ),
+            (
+                "Q4 train",
+                "2025Q4",
+                "train",
+                r"2025Q4.*only contain splits 'valid' or 'test'.*train",
+            ),
+        )
+        for name, quarter, split, expected in cases:
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    output_dir = Path(tmp)
+                    rows = minimal_case_rows()
+                    rows[quarter][0]["split"] = split
                     write_final_cli_fixture(output_dir, rows_by_quarter=rows)
 
                     with self.assertRaisesRegex(ValueError, expected):
@@ -1788,6 +1931,35 @@ class FinalProjectInputValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 ValueError,
                 r"numeric_logistic\.split_metrics\.test\.auroc",
+            ):
+                run_final_project.validate_inputs(output_dir)
+
+    def test_validation_rejects_missing_numeric_split_counts(self):
+        for field in ("n", "positives"):
+            with self.subTest(field=field):
+                with tempfile.TemporaryDirectory() as tmp:
+                    output_dir = Path(tmp)
+                    baseline = complete_numeric_baseline()
+                    del baseline["split_metrics"]["test"][field]
+                    write_final_cli_fixture(output_dir, baseline=baseline)
+
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        rf"numeric_logistic\.split_metrics\.test\.{field}",
+                    ):
+                        run_final_project.validate_inputs(output_dir)
+
+    def test_validation_rejects_numeric_split_count_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            baseline = complete_numeric_baseline()
+            baseline["split_metrics"]["valid"]["positives"] = 0
+            write_final_cli_fixture(output_dir, baseline=baseline)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                r"numeric_logistic\.split_metrics\.valid\.positives"
+                r".*expected 1.*got 0",
             ):
                 run_final_project.validate_inputs(output_dir)
 
@@ -1906,6 +2078,64 @@ class FinalProjectInputValidationTests(unittest.TestCase):
                     rows = minimal_case_rows()
                     audit = complete_feature_audit(rows)
                     mutate(audit)
+                    write_final_cli_fixture(
+                        output_dir,
+                        rows_by_quarter=rows,
+                        audit=audit,
+                    )
+
+                    with self.assertRaisesRegex(ValueError, expected):
+                        run_final_project.validate_inputs(output_dir)
+
+    def test_validation_rejects_stale_audit_missing_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            rows = minimal_case_rows()
+            rows["2025Q2"][0]["age_years"] = ""
+            audit = complete_feature_audit(rows)
+            audit["missing"] = {"age_years": 0}
+            write_final_cli_fixture(
+                output_dir,
+                rows_by_quarter=rows,
+                audit=audit,
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                r"feature_audit\.missing\.age_years.*expected 1.*got 0",
+            ):
+                run_final_project.validate_inputs(output_dir)
+
+    def test_validation_rejects_invalid_audit_missing_entries(self):
+        cases = (
+            (
+                "not mapping",
+                [],
+                r"feature_audit\.missing.*expected mapping",
+            ),
+            (
+                "unknown column",
+                {"not_a_csv_column": 0},
+                r"feature_audit\.missing\.not_a_csv_column.*CSV schema",
+            ),
+            (
+                "negative",
+                {"age_years": -1},
+                r"feature_audit\.missing\.age_years",
+            ),
+            (
+                "above total",
+                {"age_years": 11},
+                r"feature_audit\.missing\.age_years.*total",
+            ),
+        )
+        for name, missing, expected in cases:
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    output_dir = Path(tmp)
+                    rows = minimal_case_rows()
+                    audit = complete_feature_audit(rows)
+                    audit["missing"] = missing
                     write_final_cli_fixture(
                         output_dir,
                         rows_by_quarter=rows,
@@ -2091,9 +2321,12 @@ class FinalProjectReadmeTests(unittest.TestCase):
             text,
         )
         self.assertIn(
-            "python3 scripts/run_final_project.py --out outputs_sample",
+            "python3 scripts/run_final_project.py --out outputs_sample "
+            "--report /tmp/DataMining-FDA-sample-report.md "
+            "--dashboard /tmp/DataMining-FDA-sample-dashboard.html",
             text,
         )
+        self.assertIn("临时验证", text)
         for artifact in (
             "outputs/ablations/ablation_metrics.json",
             "outputs/weak_supervision/weak_supervision_metrics.json",

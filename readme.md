@@ -62,10 +62,10 @@ python3 -m unittest discover -s tests
 python3 scripts/run_final_project.py --out outputs
 ```
 
-快速验证已有样本产物：
+临时验证已有样本产物，并将报告与 Dashboard 写入 `/tmp`，避免覆盖正式终期交付：
 
 ```bash
-python3 scripts/run_final_project.py --out outputs_sample
+python3 scripts/run_final_project.py --out outputs_sample --report /tmp/DataMining-FDA-sample-report.md --dashboard /tmp/DataMining-FDA-sample-dashboard.html
 ```
 
 终期产物：

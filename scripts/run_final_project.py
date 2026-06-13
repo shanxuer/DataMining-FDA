@@ -22,15 +22,27 @@ import weak_supervision
 
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_QUARTERS = tuple(f"2025Q{quarter}" for quarter in range(1, 5))
-FINAL_CASE_COLUMNS = {
+CASE_FILENAME_PATTERN = re.compile(
+    r"cases_(2025Q[1-4])\.csv",
+    flags=re.IGNORECASE,
+)
+REQUIRED_CASE_COLUMNS = {
+    "quarter",
     "split",
     "label_serious",
     "text_tokens",
     "safetyreportid",
     "receivedate",
-    "quarter",
     "primarysourcecountry",
+    "occurcountry",
+    "reporttype",
+    "fulfillexpeditecriteria",
+    "duplicate",
+    "reportercountry",
+    "qualification",
+    "sendertype",
     "patientsex",
+    "patientagegroup",
     "age_years",
     "drug_count",
     "suspect_drug_count",
@@ -97,18 +109,26 @@ def _nonnegative_integer(value: Any, context: str) -> int:
 
 
 def _discover_case_paths(interim_dir: Path) -> list[Path]:
-    paths = sorted(interim_dir.glob("cases_*.csv"))
+    paths = (
+        sorted(
+            path
+            for path in interim_dir.iterdir()
+            if path.is_file() and path.name.lower().startswith("cases_")
+        )
+        if interim_dir.is_dir()
+        else []
+    )
     by_quarter: dict[str, list[Path]] = {
         quarter: []
         for quarter in EXPECTED_QUARTERS
     }
-    extra: list[Path] = []
+    invalid: list[Path] = []
     for path in paths:
-        matches = re.findall(r"2025q([1-4])", path.stem, flags=re.IGNORECASE)
-        if len(matches) != 1:
-            extra.append(path)
+        match = CASE_FILENAME_PATTERN.fullmatch(path.name)
+        if match is None:
+            invalid.append(path)
             continue
-        quarter = f"2025Q{matches[0]}"
+        quarter = match.group(1).upper()
         by_quarter[quarter].append(path)
 
     missing = [
@@ -121,11 +141,21 @@ def _discover_case_paths(interim_dir: Path) -> list[Path]:
         for quarter, quarter_paths in by_quarter.items()
         if len(quarter_paths) > 1
     }
-    if missing or duplicates or extra or len(paths) != len(EXPECTED_QUARTERS):
+    if (
+        missing
+        or duplicates
+        or invalid
+        or len(paths) != len(EXPECTED_QUARTERS)
+    ):
         details = [
             "Case CSV files must exactly cover 2025Q1, 2025Q2, 2025Q3, "
             f"and 2025Q4 in {interim_dir}"
         ]
+        if invalid:
+            details.append(
+                "invalid filename candidates: "
+                + ", ".join(path.name for path in invalid)
+            )
         if duplicates:
             duplicate_text = ", ".join(
                 f"{quarter} ({', '.join(path.name for path in quarter_paths)})"
@@ -134,11 +164,6 @@ def _discover_case_paths(interim_dir: Path) -> list[Path]:
             details.append(f"duplicate quarters: {duplicate_text}")
         if missing:
             details.append(f"missing quarters: {', '.join(missing)}")
-        if extra:
-            details.append(
-                "extra case CSV files: "
-                + ", ".join(path.name for path in extra)
-            )
         details.append(f"found {len(paths)} case CSV files")
         raise ValueError("; ".join(details))
 
@@ -200,6 +225,23 @@ def _validate_numeric_baseline(metrics_path: Path) -> dict[str, Any]:
                 _required(values, metric_name, metric_context),
                 metric_context,
             )
+        n = _nonnegative_integer(
+            _required(values, "n", f"{split_context}.n"),
+            f"{split_context}.n",
+        )
+        positives = _nonnegative_integer(
+            _required(
+                values,
+                "positives",
+                f"{split_context}.positives",
+            ),
+            f"{split_context}.positives",
+        )
+        if positives > n:
+            raise ValueError(
+                f"{split_context}.positives: expected at most n={n}, "
+                f"got {positives}"
+            )
 
     error_context = f"{context}.error_cases"
     error_cases = _mapping(
@@ -238,7 +280,13 @@ def _validate_numeric_baseline(metrics_path: Path) -> dict[str, Any]:
 
 def _scan_case_files(
     case_paths: list[Path],
-) -> tuple[int, dict[str, Counter], dict[str, Counter]]:
+    audit_missing_fields: set[str],
+) -> tuple[
+    int,
+    dict[str, Counter],
+    dict[str, Counter],
+    Counter,
+]:
     total = 0
     by_quarter = {
         quarter: Counter(n=0, positive=0)
@@ -248,34 +296,57 @@ def _scan_case_files(
         split: Counter(n=0, positive=0)
         for split in VALID_SPLITS
     }
+    missing_counts: Counter = Counter()
 
     for path, expected_quarter in zip(case_paths, EXPECTED_QUARTERS):
         file_rows = 0
         with path.open("r", encoding="utf-8", newline="") as handle:
             reader = csv.DictReader(handle)
             fieldnames = set(reader.fieldnames or [])
-            missing = sorted(FINAL_CASE_COLUMNS - fieldnames)
+            missing = sorted(REQUIRED_CASE_COLUMNS - fieldnames)
             if missing:
                 raise ValueError(f"{path}: missing columns: {missing}")
+            unknown_audit_fields = sorted(
+                audit_missing_fields - fieldnames
+            )
+            if unknown_audit_fields:
+                field = unknown_audit_fields[0]
+                raise ValueError(
+                    f"feature_audit.missing.{field}: field is not in "
+                    f"CSV schema for {path}"
+                )
             for line_number, row in enumerate(reader, start=2):
                 file_rows += 1
-                split = (row.get("split") or "").strip()
+                split = row.get("split")
                 if split not in by_split:
                     raise ValueError(
                         f"{path}:{line_number}: unknown split {split!r}; "
                         f"expected train, valid, or test"
                     )
-                label_text = (row.get("label_serious") or "").strip()
+                label_text = row.get("label_serious")
                 if label_text not in ("0", "1"):
                     raise ValueError(
                         f"{path}:{line_number}: label_serious must be 0 or 1, "
                         f"got {label_text!r}"
                     )
-                row_quarter = (row.get("quarter") or "").strip().upper()
+                row_quarter = row.get("quarter")
                 if row_quarter != expected_quarter:
                     raise ValueError(
                         f"{path}:{line_number}: row quarter {row_quarter!r} "
                         f"does not match file quarter {expected_quarter}"
+                    )
+                if expected_quarter != "2025Q4" and split != "train":
+                    raise ValueError(
+                        f"{path}:{line_number}: {expected_quarter} may only "
+                        f"contain split 'train', got {split!r}"
+                    )
+                if expected_quarter == "2025Q4" and split not in (
+                    "valid",
+                    "test",
+                ):
+                    raise ValueError(
+                        f"{path}:{line_number}: 2025Q4 may only contain "
+                        f"splits 'valid' or 'test', got {split!r}"
                     )
 
                 label = int(label_text)
@@ -284,6 +355,9 @@ def _scan_case_files(
                 by_quarter[expected_quarter]["positive"] += label
                 by_split[split]["n"] += 1
                 by_split[split]["positive"] += label
+                for field in audit_missing_fields:
+                    if row.get(field) == "":
+                        missing_counts[field] += 1
 
         if file_rows == 0:
             raise ValueError(f"{path}: CSV must contain at least one data row")
@@ -295,7 +369,30 @@ def _scan_case_files(
                 f"Split {split} must contain both classes, got "
                 f"0={negatives}, 1={counts['positive']}"
             )
-    return total, by_quarter, by_split
+    return total, by_quarter, by_split, missing_counts
+
+
+def _validate_numeric_split_counts(
+    baseline: dict[str, Any],
+    by_split: dict[str, Counter],
+) -> None:
+    split_metrics = baseline["split_metrics"]
+    for split in VALID_SPLITS:
+        metrics = split_metrics[split]
+        expected = by_split[split]
+        for metric_name, count_name in (
+            ("n", "n"),
+            ("positives", "positive"),
+        ):
+            context = (
+                f"numeric_logistic.split_metrics.{split}.{metric_name}"
+            )
+            actual = _nonnegative_integer(metrics[metric_name], context)
+            if actual != expected[count_name]:
+                raise ValueError(
+                    f"{context}: expected {expected[count_name]} from "
+                    f"case CSVs, got {actual}"
+                )
 
 
 def _validate_audit_bucket(
@@ -317,12 +414,13 @@ def _validate_audit_bucket(
 
 
 def _validate_feature_audit(
-    audit_path: Path,
+    audit: dict[str, Any],
     total: int,
     by_quarter: dict[str, Counter],
     by_split: dict[str, Counter],
+    declared_missing: dict[str, int],
+    actual_missing: Counter,
 ) -> None:
-    audit = _mapping(_load_strict_json(audit_path), "feature_audit")
     audit_total = _nonnegative_integer(
         _required(audit, "total", "feature_audit.total"),
         "feature_audit.total",
@@ -364,6 +462,40 @@ def _validate_feature_audit(
                 context,
             )
 
+    for field, declared_count in declared_missing.items():
+        context = f"feature_audit.missing.{field}"
+        actual_count = actual_missing[field]
+        if declared_count != actual_count:
+            raise ValueError(
+                f"{context}: expected {actual_count} empty strings from "
+                f"case CSVs, got {declared_count}"
+            )
+
+
+def _load_feature_audit(
+    audit_path: Path,
+) -> tuple[dict[str, Any], dict[str, int]]:
+    audit = _mapping(_load_strict_json(audit_path), "feature_audit")
+    total = _nonnegative_integer(
+        _required(audit, "total", "feature_audit.total"),
+        "feature_audit.total",
+    )
+    missing = _mapping(
+        _required(audit, "missing", "feature_audit.missing"),
+        "feature_audit.missing",
+    )
+    declared_missing: dict[str, int] = {}
+    for field, value in missing.items():
+        context = f"feature_audit.missing.{field}"
+        count = _nonnegative_integer(value, context)
+        if count > total:
+            raise ValueError(
+                f"{context}: count {count} exceeds feature_audit.total "
+                f"{total}"
+            )
+        declared_missing[field] = count
+    return audit, declared_missing
+
 
 def validate_inputs(output_dir: Path) -> tuple[list[Path], dict[str, Any]]:
     output_dir = Path(output_dir)
@@ -371,12 +503,21 @@ def validate_inputs(output_dir: Path) -> tuple[list[Path], dict[str, Any]]:
     numeric_baseline = _validate_numeric_baseline(
         output_dir / "reports" / "model_metrics.json"
     )
-    total, by_quarter, by_split = _scan_case_files(case_paths)
+    audit, declared_missing = _load_feature_audit(
+        output_dir / "reports" / "feature_audit.json"
+    )
+    total, by_quarter, by_split, actual_missing = _scan_case_files(
+        case_paths,
+        set(declared_missing),
+    )
+    _validate_numeric_split_counts(numeric_baseline, by_split)
     _validate_feature_audit(
-        output_dir / "reports" / "feature_audit.json",
+        audit,
         total,
         by_quarter,
         by_split,
+        declared_missing,
+        actual_missing,
     )
     return case_paths, numeric_baseline
 
