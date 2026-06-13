@@ -347,7 +347,13 @@ class FinalReportTests(unittest.TestCase):
             text,
         )
         self.assertIn(
-            "python3 scripts/run_final_project.py --out outputs_sample",
+            "python3 scripts/run_final_project.py --out outputs_sample "
+            "--report /tmp/DataMining-FDA-sample-report.md "
+            "--dashboard /tmp/DataMining-FDA-sample-dashboard.html",
+            text,
+        )
+        self.assertNotIn(
+            "\npython3 scripts/run_final_project.py --out outputs_sample\n",
             text,
         )
 

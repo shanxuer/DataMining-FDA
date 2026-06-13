@@ -637,7 +637,9 @@ def render_final_report(
             "使用 `outputs_sample` 快速验证：",
             "",
             "```bash",
-            "python3 scripts/run_final_project.py --out outputs_sample",
+            "python3 scripts/run_final_project.py --out outputs_sample "
+            "--report /tmp/DataMining-FDA-sample-report.md "
+            "--dashboard /tmp/DataMining-FDA-sample-dashboard.html",
             "```",
             "",
             "## AI 工具辅助使用声明",

@@ -128,6 +128,18 @@ class RuleVoteTests(unittest.TestCase):
         self.assertIsNone(votes["device_product_issue"])
         self.assertEqual(votes["high_risk_reaction"], 1)
 
+    def test_device_rule_abstains_when_any_other_reaction_is_present(self):
+        mixed_row = make_row(
+            age="60",
+            drug_count="3",
+            reaction_count="2",
+            tokens="reac:DEVICE_MALFUNCTION reac:DIZZINESS",
+        )
+
+        votes = weak_supervision.rule_votes(mixed_row)
+
+        self.assertIsNone(votes["device_product_issue"])
+
     def test_outcome_extreme_polypharmacy_and_senior_rules_vote_positive(self):
         row = make_row(
             age="70",

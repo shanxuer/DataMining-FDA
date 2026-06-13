@@ -62,6 +62,12 @@ def rule_votes(row: dict[str, Any]) -> dict[str, int | None]:
     has_death_term = bool(tokens & DEATH_TERMS)
     has_high_risk_term = bool(tokens & HIGH_RISK_TERMS)
     has_device_term = bool(tokens & DEVICE_TERMS)
+    reaction_tokens = {
+        token for token in tokens if token.startswith("reac:")
+    }
+    has_only_device_reactions = (
+        has_device_term and reaction_tokens <= DEVICE_TERMS
+    )
 
     return {
         "death_or_fatal_reaction_term": 1 if has_death_term else None,
@@ -99,7 +105,11 @@ def rule_votes(row: dict[str, Any]) -> dict[str, int | None]:
         ),
         "device_product_issue": (
             0
-            if has_device_term and not has_death_term and not has_high_risk_term
+            if (
+                has_only_device_reactions
+                and not has_death_term
+                and not has_high_risk_term
+            )
             else None
         ),
     }
