@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import final_reporting
+import dashboard
 
 
 EXPERIMENT_ORDER = [
@@ -146,6 +147,56 @@ def sample_ablation():
 
 
 def sample_weak():
+    rules = {
+        "death_or_fatal_reaction_term": {
+            "fires": 8,
+            "coverage_rate": 0.02,
+            "positive_label_rate": 1.0,
+            "accuracy": 1.0,
+        },
+        "high_polypharmacy_10plus": {
+            "fires": 36,
+            "coverage_rate": 0.09,
+            "positive_label_rate": 0.75,
+            "accuracy": 0.75,
+        },
+        "senior_with_multiple_suspect_drugs": {
+            "fires": 28,
+            "coverage_rate": 0.07,
+            "positive_label_rate": 0.71,
+            "accuracy": 0.71,
+        },
+        "low_complexity_younger_case": {
+            "fires": 24,
+            "coverage_rate": 0.06,
+            "positive_label_rate": 0.12,
+            "accuracy": 0.88,
+        },
+        "high_risk_reaction": {
+            "fires": 50,
+            "coverage_rate": 0.125,
+            "positive_label_rate": 0.9,
+            "accuracy": 0.9,
+        },
+        "serious_reaction_outcome": {
+            "fires": 44,
+            "coverage_rate": 0.11,
+            "positive_label_rate": 0.86,
+            "accuracy": 0.86,
+        },
+        "extreme_polypharmacy_30plus": {
+            "fires": 12,
+            "coverage_rate": 0.03,
+            "positive_label_rate": 0.83,
+            "accuracy": 0.83,
+        },
+        "device_product_issue": {
+            "fires": 20,
+            "coverage_rate": 0.05,
+            "positive_label_rate": 0.1,
+            "accuracy": 0.85,
+        },
+    }
     return {
         "overall": {
             "total": 400,
@@ -158,20 +209,7 @@ def sample_weak():
             "precision": 0.82,
             "recall": 0.78,
             "f1": 0.7995,
-            "rules": {
-                "high_risk_reaction": {
-                    "fires": 50,
-                    "coverage_rate": 0.125,
-                    "positive_label_rate": 0.9,
-                    "accuracy": 0.9,
-                },
-                "device_product_issue": {
-                    "fires": 20,
-                    "coverage_rate": 0.05,
-                    "positive_label_rate": 0.1,
-                    "accuracy": 0.85,
-                },
-            },
+            "rules": rules,
         },
         "splits": {
             "test": {
@@ -785,6 +823,272 @@ class FinalReportFileTests(unittest.TestCase):
                     json.loads(path.read_text(encoding="utf-8")),
                     {},
                 )
+
+
+class DashboardTests(unittest.TestCase):
+    def test_dashboard_is_self_contained_and_contains_results(self):
+        text = dashboard.render_dashboard(
+            sample_ablation(),
+            sample_weak(),
+            sample_audit(),
+        )
+
+        self.assertTrue(text.startswith("<!doctype html>"))
+        self.assertIn('lang="zh-CN"', text)
+        self.assertIn('id="dashboard-data"', text)
+        self.assertIn('id="model-filter"', text)
+        self.assertIn('id="error-filter"', text)
+        for name in EXPERIMENT_ORDER:
+            self.assertIn(name, text)
+        self.assertIn("FP-1", text)
+        self.assertIn("0.9123", text)
+        self.assertIn("30.00%", text)
+        self.assertNotIn("http://", text)
+        self.assertNotIn("https://", text)
+
+    def test_safe_json_prevents_script_breakout_and_line_separators(self):
+        ablation = sample_ablation()
+        unsafe = "</script><script>alert(1)</script>\u2028\u2029"
+        ablation["experiments"]["all_tokens"]["error_cases"]["test"][
+            "false_positive"
+        ][0]["tokens"] = unsafe
+
+        text = dashboard.render_dashboard(
+            ablation,
+            sample_weak(),
+            sample_audit(),
+        )
+
+        self.assertNotIn(unsafe, text)
+        self.assertNotIn("</script><script>alert(1)</script>", text)
+        self.assertIn(r"<\/script>", text)
+        self.assertNotIn("\u2028", text)
+        self.assertNotIn("\u2029", text)
+        self.assertIn(r"\u2028", text)
+        self.assertIn(r"\u2029", text)
+
+    def test_dashboard_data_shapes_models_weak_rules_and_errors(self):
+        data = dashboard._dashboard_data(
+            sample_ablation(),
+            sample_weak(),
+            sample_audit(),
+        )
+
+        self.assertEqual(data["total"], 400)
+        self.assertEqual(data["serious_rate"], 0.6)
+        self.assertEqual(len(data["models"]), 6)
+        self.assertEqual(
+            [model["name"] for model in data["models"]],
+            EXPERIMENT_ORDER,
+        )
+        self.assertEqual(data["best"]["name"], "all_tokens")
+        self.assertEqual(data["best"]["auroc"], 0.91234)
+        self.assertEqual(data["weak"]["coverage"], 0.3)
+        self.assertEqual(data["weak"]["conflict"], 0.0833)
+        self.assertEqual(data["weak"]["accuracy"], 0.8)
+        self.assertEqual(data["weak"]["precision"], 0.82)
+        self.assertEqual(data["weak"]["recall"], 0.78)
+        self.assertEqual(data["weak"]["f1"], 0.7995)
+        self.assertEqual(len(data["weak"]["rules"]), 8)
+        self.assertEqual(data["errors"][0]["model"], "all_tokens")
+        self.assertEqual(data["errors"][0]["type"], "false_positive")
+        self.assertEqual(data["errors"][0]["safetyreportid"], "FP-1")
+
+    def test_dashboard_rejects_missing_experiment_invalid_metric_and_bad_audit(self):
+        cases = []
+
+        ablation = sample_ablation()
+        del ablation["experiments"]["all_tokens"]
+        cases.append(
+            (
+                r"ablation\.experiments\.all_tokens",
+                ablation,
+                sample_weak(),
+                sample_audit(),
+            )
+        )
+
+        ablation = sample_ablation()
+        ablation["experiments"]["all_tokens"]["split_metrics"]["test"][
+            "auroc"
+        ] = math.inf
+        cases.append(
+            (
+                r"ablation\.experiments\.all_tokens\.split_metrics\.test"
+                r"\.auroc",
+                ablation,
+                sample_weak(),
+                sample_audit(),
+            )
+        )
+
+        audit = sample_audit()
+        audit["by_quarter"] = []
+        cases.append(
+            (
+                r"audit\.by_quarter",
+                sample_ablation(),
+                sample_weak(),
+                audit,
+            )
+        )
+
+        for context, ablation, weak, audit in cases:
+            with self.subTest(context=context):
+                with self.assertRaisesRegex(ValueError, context):
+                    dashboard._dashboard_data(ablation, weak, audit)
+
+    def test_dashboard_rejects_non_numeric_metric_and_non_string_description(self):
+        ablation = sample_ablation()
+        ablation["experiments"]["all_tokens"]["split_metrics"]["test"][
+            "auroc"
+        ] = "0.91234"
+        with self.assertRaisesRegex(
+            ValueError,
+            r"ablation\.experiments\.all_tokens\.split_metrics\.test\.auroc",
+        ):
+            dashboard._dashboard_data(
+                ablation,
+                sample_weak(),
+                sample_audit(),
+            )
+
+        ablation = sample_ablation()
+        ablation["experiments"]["all_tokens"]["description"] = {}
+        with self.assertRaisesRegex(
+            ValueError,
+            r"ablation\.experiments\.all_tokens\.description",
+        ):
+            dashboard._dashboard_data(
+                ablation,
+                sample_weak(),
+                sample_audit(),
+            )
+
+    def test_dashboard_rejects_incomplete_weak_rule_set(self):
+        weak = sample_weak()
+        del weak["overall"]["rules"]["device_product_issue"]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"weak\.overall\.rules\.device_product_issue",
+        ):
+            dashboard._dashboard_data(
+                sample_ablation(),
+                weak,
+                sample_audit(),
+            )
+
+    def test_dashboard_without_errors_keeps_filters_and_empty_state(self):
+        ablation = sample_ablation()
+        for experiment in ablation["experiments"].values():
+            experiment["error_cases"] = {
+                "test": {
+                    "false_positive": [],
+                    "false_negative": [],
+                }
+            }
+
+        text = dashboard.render_dashboard(
+            ablation,
+            sample_weak(),
+            sample_audit(),
+        )
+
+        self.assertIn('id="model-filter"', text)
+        self.assertIn('id="error-filter"', text)
+        self.assertIn("暂无符合筛选条件的失败案例", text)
+        self.assertIn("function escapeHtml", text)
+        self.assertIn("textContent", text)
+
+
+class DashboardFileTests(unittest.TestCase):
+    def test_generate_dashboard_reads_json_and_writes_destination(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_inputs(root)
+            destination = root / "demo" / "index.html"
+
+            result = dashboard.generate_dashboard(root, destination)
+
+            self.assertEqual(result, destination)
+            text = destination.read_text(encoding="utf-8")
+            self.assertIn("0.9123", text)
+            self.assertIn("30.00%", text)
+            self.assertIn("FP-1", text)
+
+    def test_atomic_replace_failure_cleans_temp_and_preserves_destination(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_inputs(root)
+            destination = root / "index.html"
+            destination.write_text("original", encoding="utf-8")
+
+            with mock.patch.object(
+                dashboard.os,
+                "replace",
+                side_effect=OSError("replace failed"),
+            ):
+                with self.assertRaisesRegex(OSError, "replace failed"):
+                    dashboard.generate_dashboard(root, destination)
+
+            self.assertEqual(
+                destination.read_text(encoding="utf-8"),
+                "original",
+            )
+            leftovers = [
+                path
+                for path in root.iterdir()
+                if path.name.startswith(".index.html.")
+            ]
+            self.assertEqual(leftovers, [])
+
+    def test_fdopen_failure_closes_raw_fd_and_cleans_temp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            destination = root / "index.html"
+            destination.write_text("original", encoding="utf-8")
+            real_close = dashboard.os.close
+
+            with mock.patch.object(
+                dashboard.os,
+                "fdopen",
+                side_effect=OSError("fdopen failed"),
+            ), mock.patch.object(
+                dashboard.os,
+                "close",
+                wraps=real_close,
+            ) as close_spy:
+                with self.assertRaisesRegex(OSError, "fdopen failed"):
+                    dashboard._atomic_write_text(
+                        destination,
+                        "replacement",
+                    )
+
+            close_spy.assert_called_once()
+            self.assertEqual(
+                destination.read_text(encoding="utf-8"),
+                "original",
+            )
+            leftovers = [
+                path
+                for path in root.iterdir()
+                if path.name.startswith(".index.html.")
+            ]
+            self.assertEqual(leftovers, [])
+
+    def test_missing_input_file_error_contains_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            expected = root / "ablations" / "ablation_metrics.json"
+
+            with self.assertRaises(FileNotFoundError) as error:
+                dashboard.generate_dashboard(
+                    root,
+                    root / "index.html",
+                )
+
+            self.assertIn(str(expected), str(error.exception))
 
 
 if __name__ == "__main__":
