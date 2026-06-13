@@ -1438,6 +1438,7 @@ FINAL_CASE_FIELDS = [
     "patientsex",
     "patientagegroup",
     "age_years",
+    "patientweight",
     "drug_count",
     "suspect_drug_count",
     "reaction_count",
@@ -1525,6 +1526,7 @@ def minimal_case_rows():
                     "patientsex": "1",
                     "patientagegroup": "5",
                     "age_years": "60",
+                    "patientweight": "70",
                     "drug_count": "2",
                     "suspect_drug_count": "1",
                     "reaction_count": "1",
@@ -2094,6 +2096,24 @@ class FinalProjectInputValidationTests(unittest.TestCase):
             rows["2025Q2"][0]["age_years"] = ""
             audit = complete_feature_audit(rows)
             audit["missing"] = {"age_years": 0}
+            write_final_cli_fixture(
+                output_dir,
+                rows_by_quarter=rows,
+                audit=audit,
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                r"feature_audit\.missing\.age_years.*expected 1.*got 0",
+            ):
+                run_final_project.validate_inputs(output_dir)
+
+    def test_validation_rejects_omitted_nonzero_audit_missing_field(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            rows = minimal_case_rows()
+            rows["2025Q2"][0]["age_years"] = ""
+            audit = complete_feature_audit(rows)
             write_final_cli_fixture(
                 output_dir,
                 rows_by_quarter=rows,

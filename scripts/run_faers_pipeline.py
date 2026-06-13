@@ -98,6 +98,16 @@ CASE_COLUMNS = [
     "text_tokens",
 ]
 
+FEATURE_AUDIT_MISSING_FIELDS = (
+    "age_years",
+    "patientsex",
+    "patientweight",
+    "primarysourcecountry",
+    "reportercountry",
+    "qualification",
+    "text_tokens",
+)
+
 NUMERIC_FEATURES = [
     "age_years",
     "patientweight",
@@ -1169,7 +1179,6 @@ def scan_feature_stats(cases: list[Path]) -> dict[str, Any]:
             "rules": defaultdict(lambda: {"fires": 0, "positive_labels": 0}),
         },
     }
-    missing_fields = ["age_years", "patientsex", "patientweight", "primarysourcecountry", "reportercountry", "qualification", "text_tokens"]
     for row in iter_feature_rows(cases):
         stats["total"] += 1
         y = int(row["label_serious"])
@@ -1179,7 +1188,7 @@ def scan_feature_stats(cases: list[Path]) -> dict[str, Any]:
         stats["by_quarter"][quarter]["positive"] += y
         stats["by_split"][split]["n"] += 1
         stats["by_split"][split]["positive"] += y
-        for field in missing_fields:
+        for field in FEATURE_AUDIT_MISSING_FIELDS:
             if not row.get(field):
                 stats["missing"][field] += 1
         for field in ["drug_count", "drug_name_covered_count", "active_substance_count", "reaction_count", "indication_count"]:

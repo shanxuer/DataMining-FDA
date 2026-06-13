@@ -50,6 +50,9 @@ REQUIRED_CASE_COLUMNS = {
     "indication_count",
 }
 VALID_SPLITS = ("train", "valid", "test")
+FEATURE_AUDIT_MISSING_FIELDS = frozenset(
+    pipeline.FEATURE_AUDIT_MISSING_FIELDS
+)
 
 
 def _load_strict_json(path: Path) -> Any:
@@ -462,8 +465,9 @@ def _validate_feature_audit(
                 context,
             )
 
-    for field, declared_count in declared_missing.items():
+    for field in FEATURE_AUDIT_MISSING_FIELDS:
         context = f"feature_audit.missing.{field}"
+        declared_count = declared_missing.get(field, 0)
         actual_count = actual_missing[field]
         if declared_count != actual_count:
             raise ValueError(
@@ -508,7 +512,7 @@ def validate_inputs(output_dir: Path) -> tuple[list[Path], dict[str, Any]]:
     )
     total, by_quarter, by_split, actual_missing = _scan_case_files(
         case_paths,
-        set(declared_missing),
+        FEATURE_AUDIT_MISSING_FIELDS | set(declared_missing),
     )
     _validate_numeric_split_counts(numeric_baseline, by_split)
     _validate_feature_audit(
