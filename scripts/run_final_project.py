@@ -465,7 +465,7 @@ def _validate_feature_audit(
                 context,
             )
 
-    for field in FEATURE_AUDIT_MISSING_FIELDS:
+    for field in FEATURE_AUDIT_MISSING_FIELDS | set(declared_missing):
         context = f"feature_audit.missing.{field}"
         declared_count = declared_missing.get(field, 0)
         actual_count = actual_missing[field]

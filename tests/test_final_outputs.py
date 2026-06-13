@@ -2126,6 +2126,24 @@ class FinalProjectInputValidationTests(unittest.TestCase):
             ):
                 run_final_project.validate_inputs(output_dir)
 
+    def test_validation_rejects_stale_extra_audit_missing_field(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            rows = minimal_case_rows()
+            audit = complete_feature_audit(rows)
+            audit["missing"] = {"occurcountry": 1}
+            write_final_cli_fixture(
+                output_dir,
+                rows_by_quarter=rows,
+                audit=audit,
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                r"feature_audit\.missing\.occurcountry.*expected 0.*got 1",
+            ):
+                run_final_project.validate_inputs(output_dir)
+
     def test_validation_rejects_invalid_audit_missing_entries(self):
         cases = (
             (
