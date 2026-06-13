@@ -1,3 +1,4 @@
+import csv
 import json
 import math
 import sys
@@ -12,6 +13,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import final_reporting
 import dashboard
+import run_final_project
 
 
 EXPERIMENT_ORDER = [
@@ -1417,6 +1419,692 @@ class DashboardFileTests(unittest.TestCase):
                             root,
                             root / "index.html",
                         )
+
+
+FINAL_CASE_FIELDS = [
+    "quarter",
+    "split",
+    "safetyreportid",
+    "receivedate",
+    "primarysourcecountry",
+    "patientsex",
+    "age_years",
+    "drug_count",
+    "suspect_drug_count",
+    "reaction_count",
+    "indication_count",
+    "label_serious",
+    "text_tokens",
+]
+
+
+def complete_numeric_baseline():
+    metrics = {
+        name: value
+        for name, value in test_metrics(
+            0.75,
+            0.74,
+            0.7,
+            0.68,
+            0.69,
+            0.08,
+            0.8,
+        ).items()
+        if name in final_reporting.TEST_METRICS
+    }
+    return {
+        "model_path": "outputs/models/numeric_logistic.pkl",
+        "train_rows": 6,
+        "threshold_from_valid": 0.5,
+        "split_metrics": {
+            split: dict(metrics)
+            for split in ("train", "valid", "test")
+        },
+        "error_cases": {
+            split: {
+                "false_positive": [],
+                "false_negative": [],
+            }
+            for split in ("valid", "test")
+        },
+        "strata": {
+            split: {}
+            for split in ("valid", "test")
+        },
+    }
+
+
+def minimal_case_rows():
+    layout = {
+        "2025Q1": (("train", 0), ("train", 1)),
+        "2025Q2": (("train", 0), ("train", 1)),
+        "2025Q3": (("train", 0), ("train", 1)),
+        "2025Q4": (
+            ("valid", 0),
+            ("valid", 1),
+            ("test", 0),
+            ("test", 1),
+        ),
+    }
+    rows = {}
+    for quarter, split_labels in layout.items():
+        rows[quarter] = []
+        for index, (split, label) in enumerate(split_labels):
+            rows[quarter].append(
+                {
+                    "quarter": quarter,
+                    "split": split,
+                    "safetyreportid": f"{quarter}-{split}-{index}",
+                    "receivedate": "20250101",
+                    "primarysourcecountry": "US",
+                    "patientsex": "1",
+                    "age_years": "60",
+                    "drug_count": "2",
+                    "suspect_drug_count": "1",
+                    "reaction_count": "1",
+                    "indication_count": "1",
+                    "label_serious": str(label),
+                    "text_tokens": "drug:TEST reac:TEST",
+                }
+            )
+    return rows
+
+
+def complete_feature_audit(rows_by_quarter):
+    by_quarter = {}
+    by_split = {}
+    total = 0
+    for quarter, rows in rows_by_quarter.items():
+        by_quarter[quarter] = {
+            "n": len(rows),
+            "positive": sum(int(row["label_serious"]) for row in rows),
+        }
+        total += len(rows)
+        for row in rows:
+            split = row["split"]
+            bucket = by_split.setdefault(split, {"n": 0, "positive": 0})
+            bucket["n"] += 1
+            bucket["positive"] += int(row["label_serious"])
+    return {
+        "total": total,
+        "by_quarter": by_quarter,
+        "by_split": by_split,
+        "missing": {},
+    }
+
+
+def write_final_cli_fixture(
+    output_dir,
+    *,
+    rows_by_quarter=None,
+    fieldnames=None,
+    filenames=None,
+    baseline=None,
+    audit=None,
+):
+    rows_by_quarter = (
+        minimal_case_rows()
+        if rows_by_quarter is None
+        else rows_by_quarter
+    )
+    fieldnames = FINAL_CASE_FIELDS if fieldnames is None else fieldnames
+    filenames = (
+        {
+            quarter: f"cases_{quarter}.csv"
+            for quarter in rows_by_quarter
+        }
+        if filenames is None
+        else filenames
+    )
+    interim = output_dir / "interim"
+    reports = output_dir / "reports"
+    interim.mkdir(parents=True)
+    reports.mkdir(parents=True)
+    for quarter, rows in rows_by_quarter.items():
+        path = interim / filenames[quarter]
+        with path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=fieldnames,
+                extrasaction="ignore",
+            )
+            writer.writeheader()
+            writer.writerows(rows)
+
+    numeric = (
+        complete_numeric_baseline()
+        if baseline is None
+        else baseline
+    )
+    (reports / "model_metrics.json").write_text(
+        json.dumps({"models": {"numeric_logistic": numeric}}),
+        encoding="utf-8",
+    )
+    feature_audit = (
+        complete_feature_audit(rows_by_quarter)
+        if audit is None
+        else audit
+    )
+    (reports / "feature_audit.json").write_text(
+        json.dumps(feature_audit),
+        encoding="utf-8",
+    )
+    return rows_by_quarter
+
+
+class FinalProjectInputValidationTests(unittest.TestCase):
+    def test_validation_requires_exactly_four_quarterly_case_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            (output_dir / "interim").mkdir()
+
+            with self.assertRaisesRegex(ValueError, r"2025Q1.*2025Q4"):
+                run_final_project.validate_inputs(output_dir)
+
+    def test_validation_rejects_duplicate_and_missing_quarter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            rows = minimal_case_rows()
+            filenames = {
+                "2025Q1": "cases_2025Q1.csv",
+                "2025Q2": "cases_2025Q2.csv",
+                "2025Q3": "cases_2025Q3.csv",
+                "2025Q4": "cases_2025Q3_copy.csv",
+            }
+            write_final_cli_fixture(
+                output_dir,
+                rows_by_quarter=rows,
+                filenames=filenames,
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                r"duplicate.*2025Q3.*missing.*2025Q4",
+            ):
+                run_final_project.validate_inputs(output_dir)
+
+    def test_validation_rejects_extra_case_csv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            write_final_cli_fixture(output_dir)
+            extra = output_dir / "interim" / "cases_2025Q5.csv"
+            extra.write_text("split,label_serious\ntrain,0\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, r"extra.*cases_2025Q5.csv"):
+                run_final_project.validate_inputs(output_dir)
+
+    def test_numeric_baseline_is_checked_before_csv_schema(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            interim = output_dir / "interim"
+            interim.mkdir()
+            for quarter in range(1, 5):
+                (interim / f"cases_2025Q{quarter}.csv").write_text(
+                    "split\ntrain\n",
+                    encoding="utf-8",
+                )
+
+            expected = output_dir / "reports" / "model_metrics.json"
+            with self.assertRaises(FileNotFoundError) as error:
+                run_final_project.validate_inputs(output_dir)
+
+            self.assertIn(str(expected), str(error.exception))
+
+    def test_validation_rejects_missing_numeric_baseline_before_schema(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            interim = output_dir / "interim"
+            reports = output_dir / "reports"
+            interim.mkdir()
+            reports.mkdir()
+            for quarter in range(1, 5):
+                (interim / f"cases_2025Q{quarter}.csv").write_text(
+                    "split\ntrain\n",
+                    encoding="utf-8",
+                )
+            (reports / "model_metrics.json").write_text(
+                json.dumps({"models": {}}),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "numeric_logistic"):
+                run_final_project.validate_inputs(output_dir)
+
+    def test_validation_reports_path_and_missing_schema_columns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            rows = minimal_case_rows()
+            write_final_cli_fixture(
+                output_dir,
+                rows_by_quarter=rows,
+                fieldnames=["quarter", "split", "label_serious"],
+            )
+            expected_path = output_dir / "interim" / "cases_2025Q1.csv"
+
+            with self.assertRaises(ValueError) as error:
+                run_final_project.validate_inputs(output_dir)
+
+            message = str(error.exception)
+            self.assertIn(str(expected_path), message)
+            self.assertIn("text_tokens", message)
+            self.assertIn("safetyreportid", message)
+
+    def test_validation_requires_all_splits_and_both_classes(self):
+        cases = (
+            (
+                "missing valid",
+                lambda rows: [
+                    row.__setitem__("split", "train")
+                    for row in rows["2025Q4"]
+                    if row["split"] == "valid"
+                ],
+                r"Split valid.*both classes",
+            ),
+            (
+                "valid single class",
+                lambda rows: [
+                    row.__setitem__("label_serious", "0")
+                    for row in rows["2025Q4"]
+                    if row["split"] == "valid"
+                ],
+                r"Split valid.*both classes",
+            ),
+            (
+                "test single class",
+                lambda rows: [
+                    row.__setitem__("label_serious", "1")
+                    for row in rows["2025Q4"]
+                    if row["split"] == "test"
+                ],
+                r"Split test.*both classes",
+            ),
+        )
+        for name, mutate, expected in cases:
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    output_dir = Path(tmp)
+                    rows = minimal_case_rows()
+                    mutate(rows)
+                    write_final_cli_fixture(output_dir, rows_by_quarter=rows)
+
+                    with self.assertRaisesRegex(ValueError, expected):
+                        run_final_project.validate_inputs(output_dir)
+
+    def test_validation_rejects_unknown_split_invalid_label_and_quarter_mismatch(self):
+        cases = (
+            (
+                "unknown split",
+                lambda rows: rows["2025Q1"][0].__setitem__(
+                    "split",
+                    "holdout",
+                ),
+                r"unknown split.*holdout",
+            ),
+            (
+                "invalid label",
+                lambda rows: rows["2025Q1"][0].__setitem__(
+                    "label_serious",
+                    "2",
+                ),
+                r"label_serious.*0 or 1",
+            ),
+            (
+                "quarter mismatch",
+                lambda rows: rows["2025Q1"][0].__setitem__(
+                    "quarter",
+                    "2025Q2",
+                ),
+                r"quarter.*2025Q2.*2025Q1",
+            ),
+        )
+        for name, mutate, expected in cases:
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    output_dir = Path(tmp)
+                    rows = minimal_case_rows()
+                    mutate(rows)
+                    write_final_cli_fixture(output_dir, rows_by_quarter=rows)
+
+                    with self.assertRaisesRegex(ValueError, expected):
+                        run_final_project.validate_inputs(output_dir)
+
+    def test_validation_requires_nonempty_csv_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            rows = minimal_case_rows()
+            rows["2025Q2"] = []
+            write_final_cli_fixture(output_dir, rows_by_quarter=rows)
+
+            with self.assertRaisesRegex(ValueError, r"cases_2025Q2.csv.*at least one"):
+                run_final_project.validate_inputs(output_dir)
+
+    def test_validation_rejects_incomplete_numeric_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            baseline = complete_numeric_baseline()
+            del baseline["split_metrics"]["test"]["auroc"]
+            write_final_cli_fixture(output_dir, baseline=baseline)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                r"numeric_logistic\.split_metrics\.test\.auroc",
+            ):
+                run_final_project.validate_inputs(output_dir)
+
+    def test_validation_rejects_incomplete_numeric_error_cases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            baseline = complete_numeric_baseline()
+            del baseline["error_cases"]["test"]["false_positive"]
+            write_final_cli_fixture(output_dir, baseline=baseline)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                r"numeric_logistic\.error_cases\.test\.false_positive",
+            ):
+                run_final_project.validate_inputs(output_dir)
+
+    def test_validation_wraps_numeric_overflow_with_field_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            baseline = complete_numeric_baseline()
+            baseline["split_metrics"]["test"]["auroc"] = 10**10000
+            write_final_cli_fixture(output_dir, baseline=baseline)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                r"numeric_logistic\.split_metrics\.test\.auroc",
+            ):
+                run_final_project.validate_inputs(output_dir)
+
+    def test_validation_returns_ordered_paths_and_deep_copied_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            rows = minimal_case_rows()
+            filenames = {
+                "2025Q1": "cases_2025q1.csv",
+                "2025Q2": "cases_2025Q2.csv",
+                "2025Q3": "cases_2025q3.csv",
+                "2025Q4": "cases_2025Q4.csv",
+            }
+            baseline = complete_numeric_baseline()
+            write_final_cli_fixture(
+                output_dir,
+                rows_by_quarter=rows,
+                filenames=filenames,
+                baseline=baseline,
+            )
+
+            paths, result = run_final_project.validate_inputs(output_dir)
+            result["split_metrics"]["test"]["auroc"] = 0.01
+            persisted = json.loads(
+                (output_dir / "reports" / "model_metrics.json").read_text(
+                    encoding="utf-8",
+                )
+            )
+
+            self.assertEqual(
+                [path.name for path in paths],
+                [
+                    "cases_2025q1.csv",
+                    "cases_2025Q2.csv",
+                    "cases_2025q3.csv",
+                    "cases_2025Q4.csv",
+                ],
+            )
+            self.assertEqual(
+                persisted["models"]["numeric_logistic"]["split_metrics"][
+                    "test"
+                ]["auroc"],
+                baseline["split_metrics"]["test"]["auroc"],
+            )
+
+    def test_validation_rejects_nonstandard_json_constants(self):
+        cases = (
+            ("model_metrics.json", '{"models":{"numeric_logistic":NaN}}'),
+            ("feature_audit.json", '{"total":NaN}'),
+        )
+        for filename, payload in cases:
+            with self.subTest(filename=filename):
+                with tempfile.TemporaryDirectory() as tmp:
+                    output_dir = Path(tmp)
+                    write_final_cli_fixture(output_dir)
+                    path = output_dir / "reports" / filename
+                    path.write_text(payload, encoding="utf-8")
+
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        rf"{filename}.*NaN",
+                    ):
+                        run_final_project.validate_inputs(output_dir)
+
+    def test_validation_rejects_audit_total_quarter_and_split_mismatch(self):
+        cases = (
+            (
+                "total",
+                lambda audit: audit.__setitem__("total", 11),
+                r"feature_audit\.total.*10",
+            ),
+            (
+                "quarter",
+                lambda audit: audit["by_quarter"]["2025Q4"].__setitem__(
+                    "positive",
+                    1,
+                ),
+                r"feature_audit\.by_quarter\.2025Q4.*positive",
+            ),
+            (
+                "split",
+                lambda audit: audit["by_split"]["test"].__setitem__("n", 3),
+                r"feature_audit\.by_split\.test.*n",
+            ),
+        )
+        for name, mutate, expected in cases:
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    output_dir = Path(tmp)
+                    rows = minimal_case_rows()
+                    audit = complete_feature_audit(rows)
+                    mutate(audit)
+                    write_final_cli_fixture(
+                        output_dir,
+                        rows_by_quarter=rows,
+                        audit=audit,
+                    )
+
+                    with self.assertRaisesRegex(ValueError, expected):
+                        run_final_project.validate_inputs(output_dir)
+
+
+class FinalProjectCliTests(unittest.TestCase):
+    def test_main_runs_final_steps_in_order_with_custom_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output_dir = root / "custom-output"
+            report = root / "report.md"
+            dashboard_path = root / "dashboard.html"
+            case_paths = [root / f"cases_2025Q{quarter}.csv" for quarter in range(1, 5)]
+            baseline = complete_numeric_baseline()
+            calls = []
+
+            with mock.patch.object(
+                run_final_project,
+                "validate_inputs",
+                return_value=(case_paths, baseline),
+            ) as validate, mock.patch.object(
+                run_final_project.final_experiments,
+                "run_ablation_experiments",
+                side_effect=lambda *args, **kwargs: calls.append("ablation"),
+            ) as ablation, mock.patch.object(
+                run_final_project.weak_supervision,
+                "run_weak_supervision",
+                side_effect=lambda *args, **kwargs: calls.append("weak"),
+            ) as weak, mock.patch.object(
+                run_final_project.final_reporting,
+                "generate_final_report",
+                side_effect=lambda *args, **kwargs: calls.append("report"),
+            ) as report_generator, mock.patch.object(
+                run_final_project.dashboard,
+                "generate_dashboard",
+                side_effect=lambda *args, **kwargs: calls.append("dashboard"),
+            ) as dashboard_generator, mock.patch(
+                "builtins.print",
+            ) as printer:
+                result = run_final_project.main(
+                    [
+                        "--out",
+                        str(output_dir),
+                        "--report",
+                        str(report),
+                        "--dashboard",
+                        str(dashboard_path),
+                        "--chunk-size",
+                        "12",
+                        "--n-features",
+                        "64",
+                        "--epochs",
+                        "3",
+                        "--learning-rate",
+                        "0.2",
+                        "--l2",
+                        "0.01",
+                        "--random-state",
+                        "7",
+                    ]
+                )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(calls, ["ablation", "weak", "report", "dashboard"])
+            validate.assert_called_once_with(output_dir)
+            ablation.assert_called_once_with(
+                case_paths,
+                output_dir / "ablations",
+                baseline,
+                chunk_size=12,
+                n_features=64,
+                epochs=3,
+                learning_rate=0.2,
+                l2=0.01,
+                random_state=7,
+            )
+            weak.assert_called_once_with(
+                case_paths,
+                output_dir / "weak_supervision",
+            )
+            report_generator.assert_called_once_with(output_dir, report)
+            dashboard_generator.assert_called_once_with(
+                output_dir,
+                dashboard_path,
+            )
+            output = "\n".join(str(call.args[0]) for call in printer.call_args_list)
+            self.assertEqual(printer.call_count, 4)
+            self.assertIn(
+                str(output_dir / "ablations" / "ablation_metrics.json"),
+                output,
+            )
+            self.assertIn(
+                str(
+                    output_dir
+                    / "weak_supervision"
+                    / "weak_supervision_metrics.json"
+                ),
+                output,
+            )
+            self.assertIn(str(report), output)
+            self.assertIn(str(dashboard_path), output)
+
+    def test_main_uses_root_based_defaults(self):
+        case_paths = [
+            run_final_project.ROOT / f"cases_2025Q{quarter}.csv"
+            for quarter in range(1, 5)
+        ]
+        baseline = complete_numeric_baseline()
+        with mock.patch.object(
+            run_final_project,
+            "validate_inputs",
+            return_value=(case_paths, baseline),
+        ) as validate, mock.patch.object(
+            run_final_project.final_experiments,
+            "run_ablation_experiments",
+        ), mock.patch.object(
+            run_final_project.weak_supervision,
+            "run_weak_supervision",
+        ), mock.patch.object(
+            run_final_project.final_reporting,
+            "generate_final_report",
+        ) as report_generator, mock.patch.object(
+            run_final_project.dashboard,
+            "generate_dashboard",
+        ) as dashboard_generator, mock.patch(
+            "builtins.print",
+        ):
+            result = run_final_project.main([])
+
+        self.assertEqual(result, 0)
+        validate.assert_called_once_with(run_final_project.ROOT / "outputs")
+        report_generator.assert_called_once_with(
+            run_final_project.ROOT / "outputs",
+            run_final_project.ROOT / "最终报告.md",
+        )
+        dashboard_generator.assert_called_once_with(
+            run_final_project.ROOT / "outputs",
+            run_final_project.ROOT / "demo" / "index.html",
+        )
+
+    def test_main_does_not_run_later_steps_or_print_completion_on_failure(self):
+        case_paths = [Path(f"cases_2025Q{quarter}.csv") for quarter in range(1, 5)]
+        with mock.patch.object(
+            run_final_project,
+            "validate_inputs",
+            return_value=(case_paths, complete_numeric_baseline()),
+        ), mock.patch.object(
+            run_final_project.final_experiments,
+            "run_ablation_experiments",
+        ), mock.patch.object(
+            run_final_project.weak_supervision,
+            "run_weak_supervision",
+            side_effect=RuntimeError("weak failed"),
+        ), mock.patch.object(
+            run_final_project.final_reporting,
+            "generate_final_report",
+        ) as report_generator, mock.patch.object(
+            run_final_project.dashboard,
+            "generate_dashboard",
+        ) as dashboard_generator, mock.patch(
+            "builtins.print",
+        ) as printer:
+            with self.assertRaisesRegex(RuntimeError, "weak failed"):
+                run_final_project.main(["--out", "custom"])
+
+        report_generator.assert_not_called()
+        dashboard_generator.assert_not_called()
+        printer.assert_not_called()
+
+
+class FinalProjectReadmeTests(unittest.TestCase):
+    def test_readme_documents_final_commands_and_artifacts(self):
+        text = (ROOT / "readme.md").read_text(encoding="utf-8")
+
+        self.assertIn("## 终期实验、最终报告与 Demo", text)
+        self.assertIn(
+            "python3 scripts/run_final_project.py --out outputs",
+            text,
+        )
+        self.assertIn(
+            "python3 scripts/run_final_project.py --out outputs_sample",
+            text,
+        )
+        for artifact in (
+            "outputs/ablations/ablation_metrics.json",
+            "outputs/weak_supervision/weak_supervision_metrics.json",
+            "最终报告.md",
+            "demo/index.html",
+        ):
+            self.assertIn(artifact, text)
+        self.assertIn("完成基础流水线后", text)
+        self.assertIn("双击", text)
+        self.assertIn("离线", text)
+        self.assertNotIn("-  数据依据说明", text)
 
 
 if __name__ == "__main__":
