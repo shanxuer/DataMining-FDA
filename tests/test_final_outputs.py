@@ -277,6 +277,17 @@ def write_inputs(output_dir, ablation=None, weak=None, audit=None):
     return paths
 
 
+def dashboard_payload(html):
+    marker = '<script id="dashboard-data" type="application/json">'
+    start = html.index(marker) + len(marker)
+    end = html.index("</script>", start)
+    return html[start:end]
+
+
+def reject_json_constant(value):
+    raise ValueError(f"non-standard JSON constant: {value}")
+
+
 class FinalReportTests(unittest.TestCase):
     def test_experiment_order_is_fixed(self):
         self.assertEqual(final_reporting.EXPERIMENT_ORDER, EXPERIMENT_ORDER)
@@ -874,6 +885,10 @@ class DashboardTests(unittest.TestCase):
         self.assertIn(r"\u2028", text)
         self.assertIn(r"\u2029", text)
 
+    def test_safe_json_rejects_nonfinite_values(self):
+        with self.assertRaisesRegex(ValueError, "non-finite"):
+            dashboard._safe_json({"nested": {"value": math.nan}})
+
     def test_dashboard_data_shapes_models_weak_rules_and_errors(self):
         data = dashboard._dashboard_data(
             sample_ablation(),
@@ -1041,6 +1056,205 @@ class DashboardTests(unittest.TestCase):
                 sample_audit(),
             )
 
+    def test_dashboard_payload_is_strict_json_and_error_fields_are_whitelisted(self):
+        ablation = sample_ablation()
+        error_case = ablation["experiments"]["all_tokens"]["error_cases"][
+            "test"
+        ]["false_positive"][0]
+        error_case["unknown_nonfinite"] = math.nan
+
+        html = dashboard.render_dashboard(
+            ablation,
+            sample_weak(),
+            sample_audit(),
+        )
+        data = json.loads(
+            dashboard_payload(html),
+            parse_constant=reject_json_constant,
+        )
+
+        expected_fields = {
+            "safetyreportid",
+            "receivedate",
+            "predicted_probability",
+            "predicted_label",
+            "true_label",
+            "patientsex",
+            "age_years",
+            "drug_count",
+            "reaction_count",
+            "indication_count",
+            "tokens",
+            "model",
+            "type",
+        }
+        self.assertEqual(set(data["errors"][0]), expected_fields)
+        self.assertNotIn("unknown_nonfinite", dashboard_payload(html))
+
+    def test_dashboard_rejects_nonfinite_known_error_scalars(self):
+        context = (
+            r"ablation\.experiments\.all_tokens\.error_cases\.test"
+            r"\.false_positive\[0\]"
+        )
+        for field, invalid in (
+            ("age_years", math.nan),
+            ("tokens", math.inf),
+        ):
+            with self.subTest(field=field):
+                ablation = sample_ablation()
+                ablation["experiments"]["all_tokens"]["error_cases"]["test"][
+                    "false_positive"
+                ][0][field] = invalid
+                with self.assertRaisesRegex(
+                    ValueError,
+                    rf"{context}\.{field}",
+                ):
+                    dashboard._dashboard_data(
+                        ablation,
+                        sample_weak(),
+                        sample_audit(),
+                    )
+
+    def test_dashboard_rejects_out_of_range_metrics_and_probability(self):
+        cases = (
+            (
+                r"ablation\.experiments\.all_tokens\.split_metrics\.test"
+                r"\.auroc",
+                lambda ablation, weak: ablation["experiments"]["all_tokens"][
+                    "split_metrics"
+                ]["test"].__setitem__("auroc", -0.01),
+            ),
+            (
+                r"weak\.overall\.coverage_rate",
+                lambda ablation, weak: weak["overall"].__setitem__(
+                    "coverage_rate",
+                    1.01,
+                ),
+            ),
+            (
+                r"weak\.overall\.rules\.high_risk_reaction\.accuracy",
+                lambda ablation, weak: weak["overall"]["rules"][
+                    "high_risk_reaction"
+                ].__setitem__("accuracy", -0.01),
+            ),
+            (
+                r"ablation\.experiments\.all_tokens\.error_cases\.test"
+                r"\.false_positive\[0\]\.predicted_probability",
+                lambda ablation, weak: ablation["experiments"]["all_tokens"][
+                    "error_cases"
+                ]["test"]["false_positive"][0].__setitem__(
+                    "predicted_probability",
+                    1.01,
+                ),
+            ),
+        )
+        for context, mutate in cases:
+            with self.subTest(context=context):
+                ablation = sample_ablation()
+                weak = sample_weak()
+                mutate(ablation, weak)
+                with self.assertRaisesRegex(ValueError, context):
+                    dashboard._dashboard_data(
+                        ablation,
+                        weak,
+                        sample_audit(),
+                    )
+
+    def test_dashboard_rejects_inconsistent_audit_quarters(self):
+        cases = (
+            (
+                r"audit\.by_quarter\.2025Q1\.positive",
+                lambda audit: audit["by_quarter"]["2025Q1"].__setitem__(
+                    "positive",
+                    101,
+                ),
+            ),
+            (
+                r"audit\.by_quarter.*sum.*audit\.total",
+                lambda audit: audit["by_quarter"]["2025Q4"].__setitem__(
+                    "n",
+                    299,
+                ),
+            ),
+        )
+        for context, mutate in cases:
+            with self.subTest(context=context):
+                audit = sample_audit()
+                mutate(audit)
+                with self.assertRaisesRegex(ValueError, context):
+                    dashboard._dashboard_data(
+                        sample_ablation(),
+                        sample_weak(),
+                        audit,
+                    )
+
+    def test_dashboard_accepts_zero_total_with_zero_quarters(self):
+        audit = {
+            "total": 0,
+            "by_quarter": {
+                "2025Q1": {"n": 0, "positive": 0},
+            },
+        }
+
+        data = dashboard._dashboard_data(
+            sample_ablation(),
+            sample_weak(),
+            audit,
+        )
+
+        self.assertEqual(data["serious_rate"], 0.0)
+
+    def test_dashboard_rejects_rule_fires_above_total(self):
+        weak = sample_weak()
+        weak["overall"]["rules"]["high_risk_reaction"]["fires"] = 401
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"weak\.overall\.rules\.high_risk_reaction\.fires",
+        ):
+            dashboard._dashboard_data(
+                sample_ablation(),
+                weak,
+                sample_audit(),
+            )
+
+    def test_dashboard_rejects_error_type_label_mismatch(self):
+        cases = (
+            (
+                "false_positive",
+                0,
+                0,
+            ),
+            (
+                "false_negative",
+                1,
+                1,
+            ),
+        )
+        for error_type, predicted_label, true_label in cases:
+            with self.subTest(error_type=error_type):
+                ablation = sample_ablation()
+                source = dict(
+                    ablation["experiments"]["all_tokens"]["error_cases"][
+                        "test"
+                    ]["false_positive"][0]
+                )
+                source["predicted_label"] = predicted_label
+                source["true_label"] = true_label
+                ablation["experiments"]["all_tokens"]["error_cases"]["test"][
+                    error_type
+                ] = [source]
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"ablation\.experiments\.all_tokens\.error_cases\.test"
+                    rf"\.{error_type}\[0\]",
+                ):
+                    dashboard._dashboard_data(
+                        ablation,
+                        sample_weak(),
+                        sample_audit(),
+                    )
+
     def test_dashboard_without_errors_keeps_filters_and_empty_state(self):
         ablation = sample_ablation()
         for experiment in ablation["experiments"].values():
@@ -1151,6 +1365,26 @@ class DashboardFileTests(unittest.TestCase):
                 )
 
             self.assertIn(str(expected), str(error.exception))
+
+    def test_generate_dashboard_rejects_nonstandard_json_constants_with_path(self):
+        for constant in ("NaN", "Infinity"):
+            with self.subTest(constant=constant):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    paths = write_inputs(root)
+                    paths["ablation"].write_text(
+                        '{"experiments": %s}' % constant,
+                        encoding="utf-8",
+                    )
+
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        rf"{paths['ablation']}.*{constant}",
+                    ):
+                        dashboard.generate_dashboard(
+                            root,
+                            root / "index.html",
+                        )
 
 
 if __name__ == "__main__":

@@ -48,6 +48,12 @@ ERROR_SCALAR_FIELDS = (
     "indication_count",
     "tokens",
 )
+ERROR_OUTPUT_FIELDS = (
+    *ERROR_SCALAR_FIELDS,
+    "predicted_probability",
+    "predicted_label",
+    "true_label",
+)
 
 
 def _mapping(value: Any, context: str) -> dict[str, Any]:
@@ -86,6 +92,15 @@ def _integer(value: Any, context: str) -> int:
     if not number.is_integer() or number < 0:
         raise ValueError(f"{context}: required count is invalid: {value!r}")
     return int(number)
+
+
+def _unit_interval(value: Any, context: str) -> float:
+    number = _number(value, context)
+    if not 0.0 <= number <= 1.0:
+        raise ValueError(
+            f"{context}: required value must be between 0 and 1: {value!r}"
+        )
+    return number
 
 
 def _safe_scalar(value: Any, context: str) -> Any:
@@ -159,7 +174,7 @@ def _dashboard_data(
             context = (
                 f"{experiment_context}.split_metrics.test.{metric_name}"
             )
-            model[metric_name] = _number(
+            model[metric_name] = _unit_interval(
                 _required(test_metrics, metric_name, context),
                 context,
             )
@@ -191,7 +206,7 @@ def _dashboard_data(
             for index, raw_case in enumerate(cases):
                 case_context = f"{cases_context}[{index}]"
                 case = _mapping(raw_case, case_context)
-                validated_case = dict(case)
+                validated_case = {}
                 for field in ERROR_SCALAR_FIELDS:
                     if field in case:
                         validated_case[field] = _safe_scalar(
@@ -201,7 +216,7 @@ def _dashboard_data(
                 probability_context = (
                     f"{case_context}.predicted_probability"
                 )
-                validated_case["predicted_probability"] = _number(
+                validated_case["predicted_probability"] = _unit_interval(
                     _required(
                         case,
                         "predicted_probability",
@@ -215,9 +230,28 @@ def _dashboard_data(
                         _required(case, field, field_context),
                         field_context,
                     )
+                expected_labels = {
+                    "false_positive": (1, 0),
+                    "false_negative": (0, 1),
+                }[error_type]
+                actual_labels = (
+                    validated_case["predicted_label"],
+                    validated_case["true_label"],
+                )
+                if actual_labels != expected_labels:
+                    raise ValueError(
+                        f"{case_context}: labels are inconsistent with "
+                        f"{error_type}; expected predicted_label="
+                        f"{expected_labels[0]} and true_label="
+                        f"{expected_labels[1]}"
+                    )
                 errors.append(
                     {
-                        **validated_case,
+                        **{
+                            field: validated_case[field]
+                            for field in ERROR_OUTPUT_FIELDS
+                            if field in validated_case
+                        },
                         "model": name,
                         "type": error_type,
                     }
@@ -234,13 +268,30 @@ def _dashboard_data(
         _required(audit, "by_quarter", "audit.by_quarter"),
         "audit.by_quarter",
     )
+    quarter_total = 0
     positive_total = 0
     for quarter, raw_bucket in by_quarter.items():
         context = f"audit.by_quarter.{quarter}"
         bucket = _mapping(raw_bucket, context)
-        positive_total += _integer(
+        quarter_n = _integer(
+            _required(bucket, "n", f"{context}.n"),
+            f"{context}.n",
+        )
+        positive = _integer(
             _required(bucket, "positive", f"{context}.positive"),
             f"{context}.positive",
+        )
+        if positive > quarter_n:
+            raise ValueError(
+                f"{context}.positive: count {positive} exceeds "
+                f"{context}.n value {quarter_n}"
+            )
+        quarter_total += quarter_n
+        positive_total += positive
+    if by_quarter and quarter_total != total:
+        raise ValueError(
+            "audit.by_quarter sum of n "
+            f"({quarter_total}) does not equal audit.total ({total})"
         )
     serious_rate = positive_total / total if total else 0.0
 
@@ -249,10 +300,14 @@ def _dashboard_data(
         _required(weak, "overall", "weak.overall"),
         "weak.overall",
     )
+    weak_total = _integer(
+        _required(overall, "total", "weak.overall.total"),
+        "weak.overall.total",
+    )
     weak_summary = {}
     for metric_name in WEAK_METRICS:
         context = f"weak.overall.{metric_name}"
-        weak_summary[metric_name] = _number(
+        weak_summary[metric_name] = _unit_interval(
             _required(overall, metric_name, context),
             context,
         )
@@ -265,14 +320,20 @@ def _dashboard_data(
         context = f"weak.overall.rules.{name}"
         raw_rule = _required(rules_mapping, name, context)
         rule = _mapping(raw_rule, context)
+        fires = _integer(
+            _required(rule, "fires", f"{context}.fires"),
+            f"{context}.fires",
+        )
+        if fires > weak_total:
+            raise ValueError(
+                f"{context}.fires: count {fires} exceeds "
+                f"weak.overall.total value {weak_total}"
+            )
         rules.append(
             {
                 "name": str(name),
-                "fires": _integer(
-                    _required(rule, "fires", f"{context}.fires"),
-                    f"{context}.fires",
-                ),
-                "coverage": _number(
+                "fires": fires,
+                "coverage": _unit_interval(
                     _required(
                         rule,
                         "coverage_rate",
@@ -280,7 +341,7 @@ def _dashboard_data(
                     ),
                     f"{context}.coverage_rate",
                 ),
-                "accuracy": _number(
+                "accuracy": _unit_interval(
                     _required(rule, "accuracy", f"{context}.accuracy"),
                     f"{context}.accuracy",
                 ),
@@ -306,9 +367,19 @@ def _dashboard_data(
 
 
 def _safe_json(value: Any) -> str:
+    try:
+        text = json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "dashboard payload contains a non-finite numeric value"
+        ) from exc
     return (
-        json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-        .replace("</", r"<\/")
+        text.replace("</", r"<\/")
         .replace("\u2028", r"\u2028")
         .replace("\u2029", r"\u2029")
     )
@@ -765,6 +836,17 @@ def _atomic_write_text(path: Path, text: str) -> None:
         raise
 
 
+def _load_strict_json(path: Path) -> Any:
+    text = path.read_text(encoding="utf-8")
+
+    def reject_constant(value: str) -> None:
+        raise ValueError(
+            f"{path}: non-standard JSON constant is not allowed: {value}"
+        )
+
+    return json.loads(text, parse_constant=reject_constant)
+
+
 def generate_dashboard(output_dir: Path, destination: Path) -> Path:
     ablation_path = output_dir / "ablations" / "ablation_metrics.json"
     weak_path = (
@@ -774,9 +856,9 @@ def generate_dashboard(output_dir: Path, destination: Path) -> Path:
     )
     audit_path = output_dir / "reports" / "feature_audit.json"
 
-    ablation = json.loads(ablation_path.read_text(encoding="utf-8"))
-    weak = json.loads(weak_path.read_text(encoding="utf-8"))
-    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    ablation = _load_strict_json(ablation_path)
+    weak = _load_strict_json(weak_path)
+    audit = _load_strict_json(audit_path)
     text = render_dashboard(ablation, weak, audit)
     _atomic_write_text(destination, text)
     return destination
